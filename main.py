@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V10.2 - 支持多选框独立对比与小数精确识别版)
-升级亮点：
- 1. 修复小数识别丢零/漏点问题：增加图像白边 Padding、Otsu 自适应二值化与正则小数匹配，精准识别 0.193, 0.241 等小数。
- 2. 支持绘制多个选框：可在屏幕上一次性划定多个监控区域，重复值与目标值判断严格在【每个选框内部】独立进行。
- 3. 界面文案更新：统一修改为【📐 框选数字区域】，增加选框重置与编号识别展示。
- 4. 联动折叠、方式一物理抓图、音效提醒与局域网截图扫码功能全保留。
+网页刷新数字监控 (V10.3 - 选框常驻/报警变红/循环响铃/数值变化报警版)
+更新日志：
+ 1. 选框常驻显示：划定区域后选框在屏幕上实时可见，正常为绿框，报警时变为红框。
+ 2. 交互式消除报警：报警选框右上角悬浮【🔕 消除报警】按钮，点击即可消除该区域报警并停止响铃。
+ 3. 智能变化报警机制：记录已消除的数值快照，只有当表格下方增加新数据/数值发生变化且满足条件时才再次报警。
+ 4. 循环播放报警音：触发报警后持续响铃，直到用户点击消除报警。
+ 5. 界面精简：移除控制面板上的数值文本显示，识别结果全部集中在运行日志中输出。
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -64,7 +65,7 @@ def load_config():
         "reminder_sound_index": 0,
         "reminder_custom_path": "",
         "reminder_sound_count": 3,
-        "roi_list": [[100, 100, 300, 200]],  # 升级为多选框列表 [x, y, w, h]
+        "roi_list": [[100, 100, 300, 200]],
         "roi_interval_sec": 2,
         "target_same_count": 3,
         "target_value": ""
@@ -73,7 +74,6 @@ def load_config():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # 兼容旧版本的单选框配置
                 if "roi_rect" in data and "roi_list" not in data:
                     data["roi_list"] = [data["roi_rect"]]
                 default.update(data)
@@ -102,7 +102,7 @@ def get_all_local_ips():
 
 # ==================== 4. 联动折叠组件 ====================
 class CombinedCollapsiblePanel(QWidget):
-    """ 将【页面设置与刷新】和【账号密码】合并管理，通过上下箭头按钮联动收起与展开 """
+    """ 将【页面设置与刷新】和【账号密码】合并管理，支持上下箭头折叠 """
     def __init__(self, parent=None):
         super().__init__(parent)
         main_layout = QVBoxLayout(self)
@@ -143,32 +143,37 @@ class CombinedCollapsiblePanel(QWidget):
             self.toggle_btn.setText("▲ 页面设置与账号密码 (点击收起)")
 
 
-# ==================== 5. 多 ROI 交互框选覆盖层 ====================
-class MultiROIOverlay(QWidget):
+# ==================== 5. 常驻屏幕 ROI 覆盖层 (需求四：选框常驻/变红/消除按钮) ====================
+class PersistentROIOverlay(QWidget):
     roi_list_selected = Signal(list)
+    clear_alarm_requested = Signal(int) # 传递要消除报警的选框编号 (1-based)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setCursor(Qt.CrossCursor)
+
         self.rects = []
+        self.is_editing = False
         self.start_pos = None
         self.end_pos = None
-        self.is_selecting = False
+        
+        # 记录每个选框的状态: {box_idx: True/False}
+        self.alarm_states = {}
+        self.clear_btn_rects = {} # 记录消除按钮的绘制点击区域
 
-        # 顶部控制浮条
+        # 框选编辑时的顶部浮条
         self.bar = QWidget(self)
         self.bar.setStyleSheet("background-color: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;")
         bar_layout = QHBoxLayout(self.bar)
         bar_layout.setContentsMargins(10, 5, 10, 5)
 
-        self.tip_label = QLabel("鼠标拖拽绘制框选 (支持画多个) | 已画: 0 个", self.bar)
+        self.tip_label = QLabel("鼠标拖拽绘制框选 | 已画: 0 个", self.bar)
         self.tip_label.setStyleSheet("color: #a6e3a1; font-weight: bold; font-size: 12px;")
 
         self.btn_done = QPushButton("✅ 完成框选", self.bar)
         self.btn_done.setStyleSheet("background-color: #10b981; color: white; font-weight: bold; padding: 3px 10px;")
-        self.btn_done.clicked.connect(self.finish_selection)
+        self.btn_done.clicked.connect(self.finish_editing)
 
         self.btn_clear = QPushButton("🗑️ 清空", self.bar)
         self.btn_clear.setStyleSheet("background-color: #ef4444; color: white; padding: 3px 10px;")
@@ -176,7 +181,7 @@ class MultiROIOverlay(QWidget):
 
         self.btn_cancel = QPushButton("取消", self.bar)
         self.btn_cancel.setStyleSheet("background-color: #4b5563; color: white; padding: 3px 10px;")
-        self.btn_cancel.clicked.connect(self.hide)
+        self.btn_cancel.clicked.connect(self.cancel_editing)
 
         bar_layout.addWidget(self.tip_label)
         bar_layout.addSpacing(10)
@@ -184,53 +189,80 @@ class MultiROIOverlay(QWidget):
         bar_layout.addWidget(self.btn_clear)
         bar_layout.addWidget(self.btn_cancel)
 
-    def start_selection(self, existing_rects=None):
+        self.show_fullscreen_overlay()
+
+    def show_fullscreen_overlay(self):
         screen = QGuiApplication.primaryScreen()
         geo = screen.geometry()
         self.setGeometry(geo)
-        self.rects = list(existing_rects) if existing_rects else []
-        self.start_pos = None
-        self.end_pos = None
-        self.is_selecting = False
-        self.update_tip()
+        self.show()
 
+    def start_editing(self, existing_rects):
+        self.is_editing = True
+        self.rects = list(existing_rects)
+        self.setCursor(Qt.CrossCursor)
+        self.bar.show()
+        self.update_tip()
+        
+        geo = self.geometry()
         self.bar.adjustSize()
         self.bar.move((geo.width() - self.bar.width()) // 2, 20)
-
-        self.show()
+        
         self.raise_()
         self.activateWindow()
+        self.update()
 
-    def update_tip(self):
-        self.tip_label.setText(f"鼠标拖拽绘制框选 (支持画多个) | 已画: {len(self.rects)} 个")
+    def finish_editing(self):
+        self.is_editing = False
+        self.setCursor(Qt.ArrowCursor)
+        self.bar.hide()
+        self.roi_list_selected.emit(self.rects)
+        self.update()
+
+    def cancel_editing(self):
+        self.is_editing = False
+        self.setCursor(Qt.ArrowCursor)
+        self.bar.hide()
+        self.update()
 
     def clear_rects(self):
         self.rects.clear()
         self.update_tip()
         self.update()
 
-    def finish_selection(self):
-        self.hide()
-        self.roi_list_selected.emit(self.rects)
+    def update_tip(self):
+        self.tip_label.setText(f"鼠标拖拽绘制框选 | 已画: {len(self.rects)} 个")
+
+    def set_alarm_states(self, states):
+        self.alarm_states = states
+        self.update()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # 防止点击控制栏时误触画框
-            if self.bar.geometry().contains(event.position().toPoint()):
+            pos = event.globalPosition().toPoint()
+
+            # 非编辑状态下，响应“消除报警”按钮的点击
+            if not self.is_editing:
+                for box_idx, btn_r in self.clear_btn_rects.items():
+                    if btn_r.contains(pos):
+                        self.clear_alarm_requested.emit(box_idx)
+                        return
                 return
-            self.start_pos = event.globalPosition().toPoint()
-            self.end_pos = self.start_pos
-            self.is_selecting = True
+
+            # 编辑状态下，拖拽框选
+            if self.bar.geometry().contains(self.mapFromGlobal(pos)):
+                return
+            self.start_pos = pos
+            self.end_pos = pos
             self.update()
 
     def mouseMoveEvent(self, event):
-        if self.is_selecting:
+        if self.is_editing and self.start_pos:
             self.end_pos = event.globalPosition().toPoint()
             self.update()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.is_selecting:
-            self.is_selecting = False
+        if event.button() == Qt.LeftButton and self.is_editing and self.start_pos:
             self.end_pos = event.globalPosition().toPoint()
             rect = QRect(self.start_pos, self.end_pos).normalized()
             if rect.width() > 10 and rect.height() > 10:
@@ -240,37 +272,58 @@ class MultiROIOverlay(QWidget):
             self.end_pos = None
             self.update()
 
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            self.finish_selection()
-        elif event.key() == Qt.Key_Escape:
-            self.hide()
-        else:
-            super().keyPressEvent(event)
-
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
+        self.clear_btn_rects.clear()
 
-        # 绘制已确定的所有选框
+        # 编辑状态下绘制遮罩背景
+        if self.is_editing:
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
+
+        # 绘制所有选框
         for i, r in enumerate(self.rects, 1):
             local_r = QRect(self.mapFromGlobal(r.topLeft()), r.size())
-            
-            painter.setCompositionMode(QPainter.CompositionMode_Clear)
-            painter.fillRect(local_r, Qt.transparent)
-            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            is_alarm = self.alarm_states.get(i, False)
 
-            painter.setPen(QPen(QColor("#00ff66"), 2, Qt.SolidLine))
+            if self.is_editing:
+                painter.setCompositionMode(QPainter.CompositionMode_Clear)
+                painter.fillRect(local_r, Qt.transparent)
+                painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+            # 需求四：报警变红，正常变绿
+            if is_alarm:
+                border_color = QColor("#ef4444") # 红色
+                pen_width = 3
+            else:
+                border_color = QColor("#00ff66") # 绿色
+                pen_width = 2
+
+            painter.setPen(QPen(border_color, pen_width, Qt.SolidLine))
             painter.drawRect(local_r)
 
             # 选框编号角标
-            badge_rect = QRect(local_r.x(), max(0, local_r.y() - 20), 40, 20)
-            painter.fillRect(badge_rect, QColor("#00ff66"))
+            badge_rect = QRect(local_r.x(), max(0, local_r.y() - 22), 42, 22)
+            painter.fillRect(badge_rect, border_color)
             painter.setPen(QPen(QColor("#000000")))
             painter.drawText(badge_rect, Qt.AlignCenter, f"#{i}")
 
-        # 绘制正在拖拽的选框
-        if self.is_selecting and self.start_pos and self.end_pos:
+            # 需求四：如果该选框报警，在旁边绘制【🔕 消除报警】浮动按钮
+            if is_alarm:
+                btn_w, btn_h = 90, 22
+                btn_x = local_r.x() + local_r.width() - btn_w
+                btn_y = max(0, local_r.y() - 25)
+                
+                # 记录全局坐标，用于点击事件响应
+                global_btn_r = QRect(r.x() + r.width() - btn_w, max(0, r.y() - 25), btn_w, btn_h)
+                self.clear_btn_rects[i] = global_btn_r
+
+                local_btn_r = QRect(btn_x, btn_y, btn_w, btn_h)
+                painter.fillRect(local_btn_r, QColor("#ef4444"))
+                painter.setPen(QPen(QColor("#ffffff")))
+                painter.drawText(local_btn_r, Qt.AlignCenter, "🔕 消除报警")
+
+        # 正在拖拽中的虚线框
+        if self.is_editing and self.start_pos and self.end_pos:
             local_start = self.mapFromGlobal(self.start_pos)
             local_end = self.mapFromGlobal(self.end_pos)
             rect = QRect(local_start, local_end).normalized()
@@ -324,7 +377,7 @@ class QRDialog(QDialog):
         img_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(img_label)
         
-        tip_label = QLabel("📢 请确保【手机】与【电脑】连接在同一个 Wi-Fi 局域网下。\n扫码即可查看截图。")
+        tip_label = QLabel("📢 请确保【手机】与【电脑】连接在同一个 Wi-Fi 局域网下。")
         tip_label.setAlignment(Qt.AlignCenter)
         tip_label.setWordWrap(True)
         tip_label.setStyleSheet("color: #a6adc8; font-size: 12px; font-weight: bold;")
@@ -345,7 +398,7 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V10.2 - 支持多选框独立对比与小数精准识别)")
+        self.setWindowTitle("网页刷新数字监控 (V10.3 - 常驻选框/循环报警/数据变化响应版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -363,7 +416,11 @@ class MainWindow(QMainWindow):
         # 加载多 ROI 区域列表
         saved_roi_list = self.config.get("roi_list", [[100, 100, 300, 200]])
         self.roi_list = [QRect(r[0], r[1], r[2], r[3]) for r in saved_roi_list]
-        self.last_alarm_signature = None
+
+        # 需求二：报警状态与数据变化跟踪字典
+        self.box_latest_digits = {}  # {box_idx: ['0.193', ...]} 最新提取数据
+        self.box_ack_digits = {}     # {box_idx: ['0.193', ...]} 已消除报警的数据快照
+        self.box_is_alarming = {}    # {box_idx: True/False} 当前报警状态
 
         self.start_local_server()
 
@@ -459,8 +516,8 @@ class MainWindow(QMainWindow):
         self.combined_panel.container_layout.addWidget(grp_auth)
         left_layout.addWidget(self.combined_panel)
 
-        # 3. 🎯 ROI 多选框数字监控（需求二：修改文案为【框选数字区域】）
-        grp_roi = QGroupBox("🎯 数字监控 (支持多选框与小数识别)")
+        # 3. 🎯 数字监控面板 (需求三：精简删除 roi_result_label)
+        grp_roi = QGroupBox("🎯 数字监控 (常驻选框/变化报警)")
         g_roi = QVBoxLayout()
 
         h_roi_top = QHBoxLayout()
@@ -508,14 +565,15 @@ class MainWindow(QMainWindow):
         h_roi_cfg.addWidget(QLabel("秒"))
         g_roi.addLayout(h_roi_cfg)
 
+        # 需求二：控制面板全局“消除报警”按钮
+        self.clear_alarm_panel_btn = QPushButton("🚨 消除所有报警")
+        self.clear_alarm_panel_btn.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold; padding: 5px;")
+        self.clear_alarm_panel_btn.clicked.connect(self.clear_all_alarms)
+        g_roi.addWidget(self.clear_alarm_panel_btn)
+
         self.roi_info_label = QLabel(f"选中区域: {len(self.roi_list)} 个选框")
         self.roi_info_label.setStyleSheet("color: #38bdf8; font-size: 11px;")
         g_roi.addWidget(self.roi_info_label)
-
-        self.roi_result_label = QLabel("识别数值: [未检测]")
-        self.roi_result_label.setStyleSheet("color: #a7f3d0; font-size: 11px; font-weight: bold;")
-        self.roi_result_label.setWordWrap(True)
-        g_roi.addWidget(self.roi_result_label)
 
         self.roi_status_label = QLabel("状态: 待检测")
         self.roi_status_label.setStyleSheet("color: #fbbf24; font-size: 11px;")
@@ -544,16 +602,8 @@ class MainWindow(QMainWindow):
         h_rem_sound.addWidget(self.sound_combo, stretch=1)
         
         self.listen_btn = QPushButton("🎵 试听")
-        self.listen_btn.clicked.connect(lambda: self.trigger_alarm_sound(preview=True)) 
+        self.listen_btn.clicked.connect(lambda: self.trigger_single_sound()) 
         h_rem_sound.addWidget(self.listen_btn)
-
-        h_rem_sound.addWidget(QLabel("响铃:"))
-        self.rem_count = QSpinBox()
-        self.rem_count.setRange(1, 99)
-        self.rem_count.setValue(self.config.get("reminder_sound_count", 3))
-        self.rem_count.setFixedWidth(55)
-        self.rem_count.setSuffix("次")
-        h_rem_sound.addWidget(self.rem_count)
 
         g_reminder.addLayout(h_rem_sound)
         grp_reminder.setLayout(g_reminder)
@@ -620,15 +670,18 @@ class MainWindow(QMainWindow):
         self.refresh_clock.timeout.connect(self.on_refresh_clock_tick)
         self.remaining_seconds = 0
 
+        # 需求二：无线循环播放响铃定时器 (间隔 1.2 秒)
         self.alarm_loop_timer = QTimer()
         self.alarm_loop_timer.timeout.connect(self.execute_single_alarm_tick)
-        self.alarm_remaining_counts = 0
 
         self.roi_monitor_timer = QTimer()
         self.roi_monitor_timer.timeout.connect(self.perform_roi_ocr_check)
 
-        self.roi_overlay = MultiROIOverlay()
+        # 需求四：常驻选框 Overlay
+        self.roi_overlay = PersistentROIOverlay()
         self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
+        self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
+        self.roi_overlay.rects = list(self.roi_list)
 
         # ---------- 系统托盘 ----------
         tray_icon = QIcon("1.ico") if os.path.exists("1.ico") else QIcon.fromTheme("face-smile")
@@ -642,7 +695,7 @@ class MainWindow(QMainWindow):
         self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
         
-        self.log("🚀 系统初始化完成 (V10.2 - 多选框独立对比与小数精确识别版)")
+        self.log("🚀 系统初始化完成 (V10.3 - 常驻选框/循环报警/数据变化响应版)")
         if self.config["url"]:
             self.load_page()
 
@@ -717,18 +770,25 @@ class MainWindow(QMainWindow):
 
     # ---------- 选框相关操作 ----------
     def start_roi_selection(self):
-        self.log("请在屏幕上拖拽划定【数字区域】(支持连续画多个，按 Enter 或点击顶部[完成框选])")
-        self.roi_overlay.start_selection(self.roi_list)
+        self.log("请在屏幕上拖拽划定【数字区域】...")
+        self.roi_overlay.start_editing(self.roi_list)
 
     def clear_all_rois(self):
         self.roi_list.clear()
+        self.box_latest_digits.clear()
+        self.box_ack_digits.clear()
+        self.box_is_alarming.clear()
+        
+        self.roi_overlay.rects = []
+        self.roi_overlay.set_alarm_states({})
         self.roi_info_label.setText("选中区域: 0 个选框")
-        self.roi_result_label.setText("识别数值: [无区域]")
         self.roi_status_label.setText("状态: 选框已清空")
+        self.stop_alarm_audio()
         self.log("🗑️ 已清空所有框选区域")
 
     def on_roi_list_selected(self, rects):
         self.roi_list = rects
+        self.roi_overlay.rects = list(self.roi_list)
         self.roi_info_label.setText(f"选中区域: {len(self.roi_list)} 个选框")
         self.log(f"📐 完成框选，共设定 {len(self.roi_list)} 个监控区域")
         self.status_label.setText(f"✅ 已设定 {len(self.roi_list)} 个选框")
@@ -777,10 +837,8 @@ class MainWindow(QMainWindow):
             self.perform_roi_ocr_check()
 
     def segment_rows(self, img_bgr):
-        """ 自适应阈值 Otsu 水平投影分割算法，解决浅色/深色数字分割缺失问题 """
+        """ Otsu 自适应二值化水平投影分割 """
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        
-        # 根据背景明暗选择自适应 Otsu 二值化
         if np.mean(gray) > 127:
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         else:
@@ -790,7 +848,7 @@ class MainWindow(QMainWindow):
         rows = []
         in_row = False
         start_y = 0
-        min_row_height = 4  # 缩小阈值，确保小数点或极小字符不丢行
+        min_row_height = 4
 
         for y, val in enumerate(proj):
             if val > 0 and not in_row:
@@ -804,7 +862,6 @@ class MainWindow(QMainWindow):
         if in_row and (len(proj) - start_y) >= min_row_height:
             rows.append((start_y, len(proj)))
 
-        # 合并上下距离非常近的字符笔画
         merged_rows = []
         for r in rows:
             if not merged_rows:
@@ -821,11 +878,9 @@ class MainWindow(QMainWindow):
     # ==================== 核心 OCR 识别与独立匹配算法 ====================
     def perform_roi_ocr_check(self):
         if not self.roi_list:
-            self.roi_result_label.setText("识别数值: [无框选区域]")
             return
 
         if not HAS_DDDDOCR or self.ocr is None:
-            self.roi_result_label.setText("识别数值: [未加载 ddddocr]")
             return
 
         screen = QGuiApplication.primaryScreen()
@@ -834,8 +889,7 @@ class MainWindow(QMainWindow):
         target_same_n = self.target_same_count_spin.value()
         user_target_val = self.target_value_input.text().strip()
 
-        all_boxes_results = []
-        alarm_trig_boxes = []
+        log_lines = []
 
         try:
             for box_idx, rect in enumerate(self.roi_list, 1):
@@ -849,7 +903,6 @@ class MainWindow(QMainWindow):
                 pixmap = screen.grabWindow(0, phys_x, phys_y, phys_w, phys_h)
                 if pixmap.isNull() or pixmap.width() == 0: continue
 
-                # 转换 OpenCV 格式（内存字节 Padding 修正）
                 qimg = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
                 h, w = qimg.height(), qimg.width()
                 bpl = qimg.bytesPerLine()
@@ -858,7 +911,6 @@ class MainWindow(QMainWindow):
                 arr = arr[:, :w * 3].reshape((h, w, 3))
                 img_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
-                # 切割行
                 row_rects = self.segment_rows(img_bgr)
                 if not row_rects:
                     row_rects = [(0, img_bgr.shape[0])]
@@ -870,104 +922,108 @@ class MainWindow(QMainWindow):
                     rh, rw = row_img.shape[:2]
                     if rh < 3 or rw < 3: continue
 
-                    # 黄金法则 1: 3倍双三次插值放大
                     row_resized = cv2.resize(row_img, (rw * 3, rh * 3), interpolation=cv2.INTER_CUBIC)
-
-                    # 黄金法则 2: 关键！白边 Padding 拓展防止边缘 0. 被裁切识别丢失
                     row_padded = cv2.copyMakeBorder(row_resized, 15, 15, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
                     _, buf = cv2.imencode(".png", row_padded)
                     raw_text = self.ocr.classification(buf.tobytes())
 
-                    # 黄金法则 3: 将常见的逗号、冒号误识别清洗为小数点
                     raw_text_clean = raw_text.replace(',', '.').replace(':', '.')
-
-                    # 黄金法则 4: 正则表达式精确提取包括小数点的浮点数 (如 0.193, 0.241)
                     found_numbers = re.findall(r'\d+\.?\d*', raw_text_clean)
                     if found_numbers:
                         box_digits.append(found_numbers[0])
 
-                all_boxes_results.append((box_idx, box_digits))
+                # 记录最新识别数据
+                self.box_latest_digits[box_idx] = box_digits
+                val_str = " | ".join(box_digits) if box_digits else "无"
+                log_lines.append(f"【区域#{box_idx}】: [{val_str}]")
 
-                # ---------- 需求三：独立在【当前选框内部】对比 ----------
-                box_matched = False
+                # 判断规则匹配
+                rule_matched = False
                 matched_val = None
 
                 if user_target_val:
                     if box_digits.count(user_target_val) >= target_same_n:
-                        box_matched = True
+                        rule_matched = True
                         matched_val = user_target_val
                 else:
                     for i in range(len(box_digits) - target_same_n + 1):
                         sub_group = box_digits[i : i + target_same_n]
                         if sub_group and all(x == sub_group[0] for x in sub_group):
-                            box_matched = True
+                            rule_matched = True
                             matched_val = sub_group[0]
                             break
 
-                if box_matched:
-                    alarm_trig_boxes.append((box_idx, matched_val))
+                # 需求二：智能报警判定 (比较当前数据与已消除的快照)
+                ack_digits = self.box_ack_digits.get(box_idx, None)
 
-            # 界面展示多选框数值
-            display_lines = []
-            for b_idx, b_digs in all_boxes_results:
-                val_str = " | ".join(b_digs) if b_digs else "无"
-                display_lines.append(f"【区域#{b_idx}】: [{val_str}]")
-
-            res_display = "\n".join(display_lines)
-            self.roi_result_label.setText(res_display)
-            self.log(f"🎯 方式一抓取结果:\n" + "\n".join(display_lines))
-
-            # 报警判定
-            if alarm_trig_boxes:
-                trig_summary = ", ".join([f"区域#{idx}({val})" for idx, val in alarm_trig_boxes])
-                current_signature = trig_summary + f"_{target_same_n}"
-
-                if current_signature != self.last_alarm_signature:
-                    msg = f"🚨 匹配成功！{trig_summary} 满足条件！"
-                    self.roi_status_label.setText(f"状态: {msg}")
-                    self.status_label.setText(msg)
-                    self.log(f"⚠️ 【报警触发】{msg}")
-                    self.trigger_alarm_sound()
-                    self.last_alarm_signature = current_signature
+                if rule_matched:
+                    # 如果数据与已消除的快照不相同，说明有新数据产生，触发报警！
+                    if box_digits != ack_digits:
+                        self.box_is_alarming[box_idx] = True
                 else:
-                    self.roi_status_label.setText(f"状态: 持续匹配中 ({trig_summary})")
+                    # 不满足报警规则时，复位该框报警状态与快照
+                    self.box_is_alarming[box_idx] = False
+                    self.box_ack_digits[box_idx] = None
+
+            # 需求三：运行日志输出识别数值
+            self.log(f"🎯 方式一识别结果:\n" + "\n".join(log_lines))
+
+            # 需求四：更新选框颜色 (变红/变绿)
+            self.roi_overlay.set_alarm_states(self.box_is_alarming)
+
+            # 判断是否有任意区域在报警
+            alarming_boxes = [idx for idx, is_al in self.box_is_alarming.items() if is_al]
+            if alarming_boxes:
+                msg = f"🚨 区域 {alarming_boxes} 触发报警！"
+                self.roi_status_label.setText(f"状态: {msg}")
+                self.status_label.setText(msg)
+                
+                # 需求二：无限循环播放声音
+                if not self.alarm_loop_timer.isActive():
+                    self.alarm_loop_timer.start(1200)
+                    self.execute_single_alarm_tick()
             else:
-                self.last_alarm_signature = None
+                self.stop_alarm_audio()
                 rule_tip = f"目标值 '{user_target_val}'" if user_target_val else f"单区域连续 {target_same_n} 行相同"
                 self.roi_status_label.setText(f"状态: 监控中 | 规则: {rule_tip}")
 
         except Exception as e:
             self.log(f"❌ OCR 运行异常: {e}")
 
-    # ---------- 音频控制与辅助函数 ----------
-    def on_sound_selection_changed(self, index):
-        if index == 3: 
-            file_path, _ = QFileDialog.getOpenFileName(
-                self, "选择自定义报警铃声", self.custom_sound_path or os.getcwd(), "音频文件 (*.wav)"
-            )
-            if file_path:
-                self.custom_sound_path = file_path
-                self.log("🎵 已设定自定义铃声路径")
-            else:
-                self.sound_combo.setCurrentIndex(0)
+    # ---------- 需求二 & 需求四：消除报警逻辑 ----------
+    def clear_alarm_for_box(self, box_idx):
+        """ 消除指定选框的报警，并锁定当前数值快照 """
+        self.box_is_alarming[box_idx] = False
+        self.box_ack_digits[box_idx] = list(self.box_latest_digits.get(box_idx, []))
+        
+        self.log(f"🔕 已消除【区域 #{box_idx}】的报警 (已锁数据，新数据产生前不再提醒)")
+        
+        # 刷新 Overlay 框颜色
+        self.roi_overlay.set_alarm_states(self.box_is_alarming)
+        
+        # 如果没有其他框在报警，停止响铃
+        if not any(self.box_is_alarming.values()):
+            self.stop_alarm_audio()
+            self.roi_status_label.setText("状态: 报警已消除，监控中...")
 
-    def trigger_alarm_sound(self, preview=False):
-        self.alarm_loop_timer.stop() 
-        self.alarm_remaining_counts = 1 if preview else self.rem_count.value()
-        if self.alarm_remaining_counts <= 0: return
-        self.execute_single_alarm_tick()
-        if self.alarm_remaining_counts > 0:
-            self.alarm_loop_timer.start(1200)
+    def clear_all_alarms(self):
+        """ 消除所有选框的报警 """
+        for box_idx in list(self.box_is_alarming.keys()):
+            self.box_is_alarming[box_idx] = False
+            self.box_ack_digits[box_idx] = list(self.box_latest_digits.get(box_idx, []))
+
+        self.roi_overlay.set_alarm_states(self.box_is_alarming)
+        self.stop_alarm_audio()
+        self.roi_status_label.setText("状态: 已消除所有报警")
+        self.log("🔕 已消除所有区域的报警")
+
+    def stop_alarm_audio(self):
+        if self.alarm_loop_timer.isActive():
+            self.alarm_loop_timer.stop()
 
     def execute_single_alarm_tick(self):
-        if self.alarm_remaining_counts <= 0:
-            self.alarm_loop_timer.stop()
-            return
-            
-        self.alarm_remaining_counts -= 1
         index = self.sound_combo.currentIndex()
-        
         if index == 0:
             QApplication.beep()
         else:
@@ -984,9 +1040,20 @@ class MainWindow(QMainWindow):
                     QApplication.beep()
             else:
                 QApplication.beep()
-                
-        if self.alarm_remaining_counts <= 0:
-            self.alarm_loop_timer.stop()
+
+    def trigger_single_sound(self):
+        self.execute_single_alarm_tick()
+
+    def on_sound_selection_changed(self, index):
+        if index == 3: 
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "选择自定义报警铃声", self.custom_sound_path or os.getcwd(), "音频文件 (*.wav)"
+            )
+            if file_path:
+                self.custom_sound_path = file_path
+                self.log("🎵 已设定自定义铃声路径")
+            else:
+                self.sound_combo.setCurrentIndex(0)
 
     def paste_credentials(self):
         account = self.account_input.text().strip()
@@ -1029,9 +1096,7 @@ class MainWindow(QMainWindow):
         self.config["selected_ip"] = self.ip_combo.currentText() 
         self.config["reminder_sound_index"] = self.sound_combo.currentIndex()
         self.config["reminder_custom_path"] = self.custom_sound_path
-        self.config["reminder_sound_count"] = self.rem_count.value()
         
-        # 保存多选框坐标
         self.config["roi_list"] = [[r.x(), r.y(), r.width(), r.height()] for r in self.roi_list]
         self.config["roi_interval_sec"] = self.roi_interval_spin.value()
         self.config["target_same_count"] = self.target_same_count_spin.value()
