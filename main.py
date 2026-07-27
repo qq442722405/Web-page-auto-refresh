@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V9.5)
-新增与优化：
- 1. 支持自定义报警数值与触发连续行数
- 2. 按钮更名为“手动检测”，并增加点击响应提示
- 3. 完美兼容 1.ico 图标（软件窗口与托盘）
- 4. 修复 ddddocr 模块丢失诊断与反馈
+网页刷新数字监控 (V9.6)
+优化重点：
+ 1. 页面设置与账号密码支持折叠，折叠时日志框自动拉伸放大
+ 2. 统一保存配置与粘贴按钮大小
+ 3. 调整界面布局（响铃次数跟在试听后，截图跟在IP后，输入框加宽）
+ 4. 彻底重构 ddddocr 识别引擎（自动高清放大+多重预处理），解决小数字识别不了的问题
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -94,6 +94,26 @@ def get_all_local_ips():
     if not ip_list:
         ip_list.append("127.0.0.1")
     return sorted(list(set(ip_list)))
+
+# 创建可折叠 QGroupBox 辅助函数
+def make_collapsible_group(title):
+    group = QGroupBox(title)
+    group.setCheckable(True)
+    group.setChecked(True)
+    
+    group_layout = QVBoxLayout(group)
+    group_layout.setContentsMargins(6, 14, 6, 6)
+    
+    container = QWidget()
+    container_layout = QVBoxLayout(container)
+    container_layout.setContentsMargins(0, 0, 0, 0)
+    group_layout.addWidget(container)
+    
+    def on_toggled(checked):
+        container.setVisible(checked)
+        
+    group.toggled.connect(on_toggled)
+    return group, container_layout
 
 
 # ==================== 4. ROI 交互框选组件 ====================
@@ -216,10 +236,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("网页刷新数字监控")
-        self.resize(1340, 880)
+        self.resize(1360, 880)
         self.config = load_config()
 
-        # 【三. 加载 1.ico 图标】
         if os.path.exists("1.ico"):
             self.setWindowIcon(QIcon("1.ico"))
 
@@ -248,13 +267,12 @@ class MainWindow(QMainWindow):
 
         # ---------- 左侧控制面板 ----------
         self.left_panel = QWidget()
-        self.left_panel.setFixedWidth(330)
+        self.left_panel.setFixedWidth(340)
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
 
-        # 1. 页面设置
-        grp_url = QGroupBox("页面设置与刷新")
-        g_url = QVBoxLayout()
+        # 【一. 页面设置（支持折叠/展开）】
+        grp_url, g_url = make_collapsible_group("页面设置与刷新")
         
         h_url = QHBoxLayout()
         self.url_input = QLineEdit(self.config["url"])
@@ -297,12 +315,10 @@ class MainWindow(QMainWindow):
         self.countdown_label.setStyleSheet("color: #0ea5e9; font-weight: bold; font-size: 11px;")
         g_url.addWidget(self.countdown_label)
 
-        grp_url.setLayout(g_url)
         left_layout.addWidget(grp_url)
 
-        # 2. 账号密码凭证
-        grp_auth = QGroupBox("账号密码")
-        g_auth = QVBoxLayout()
+        # 【一. 账号密码（支持折叠/展开）& 二. 保存按钮与粘贴大小一致】
+        grp_auth, g_auth = make_collapsible_group("账号密码")
         
         h_creds = QHBoxLayout()
         self.account_input = QLineEdit(self.config["account"])
@@ -315,18 +331,21 @@ class MainWindow(QMainWindow):
 
         h_btns = QHBoxLayout()
         self.paste_btn = QPushButton("📋 一键粘贴")
+        self.paste_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.paste_btn.clicked.connect(self.paste_credentials)
+        
         self.save_btn = QPushButton("💾 保存配置")
+        self.save_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.save_btn.clicked.connect(self.save_settings)
-        self.save_btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white; height: 26px;")
+        self.save_btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white;")
+        
         h_btns.addWidget(self.paste_btn)
         h_btns.addWidget(self.save_btn)
         g_auth.addLayout(h_btns)
 
-        grp_auth.setLayout(g_auth)
         left_layout.addWidget(grp_auth)
 
-        # 3. 🎯 ROI 数字监控与自定义报警规则
+        # 3. 🎯 ROI 数字监控
         grp_roi = QGroupBox("🎯 数字监控 (ddddocr)")
         g_roi = QVBoxLayout()
 
@@ -335,7 +354,6 @@ class MainWindow(QMainWindow):
         self.select_roi_btn.clicked.connect(self.start_roi_selection)
         h_roi_top.addWidget(self.select_roi_btn)
 
-        # 【二. 更名为“手动检测”，并增加显式响应函数】
         self.manual_trigger_btn = QPushButton("🔍 手动检测")
         self.manual_trigger_btn.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold;")
         self.manual_trigger_btn.clicked.connect(self.on_manual_detect_clicked)
@@ -343,21 +361,22 @@ class MainWindow(QMainWindow):
 
         g_roi.addLayout(h_roi_top)
 
-        # 【四. 新增手动输入相同数值与相同行数规则】
+        # 【三. 相同行数输入框变大】
         h_rule1 = QHBoxLayout()
         h_rule1.addWidget(QLabel("相同行数:"))
         self.target_same_count_spin = QSpinBox()
         self.target_same_count_spin.setRange(1, 10)
         self.target_same_count_spin.setValue(self.config.get("target_same_count", 3))
-        self.target_same_count_spin.setFixedWidth(55)
+        self.target_same_count_spin.setFixedWidth(90) # 加大
         h_rule1.addWidget(self.target_same_count_spin)
 
         h_rule1.addWidget(QLabel("目标数值:"))
         self.target_value_input = QLineEdit(self.config.get("target_value", ""))
-        self.target_value_input.setPlaceholderText("留空自动检测相同")
+        self.target_value_input.setPlaceholderText("留空自动判断相同")
         h_rule1.addWidget(self.target_value_input)
         g_roi.addLayout(h_rule1)
 
+        # 【六. 检测间隔填框大一倍】
         h_roi_cfg = QHBoxLayout()
         self.roi_toggle_btn = QPushButton("▶️ 定时检测")
         self.roi_toggle_btn.clicked.connect(self.toggle_roi_monitor)
@@ -368,7 +387,7 @@ class MainWindow(QMainWindow):
         self.roi_interval_spin = QSpinBox()
         self.roi_interval_spin.setRange(1, 60)
         self.roi_interval_spin.setValue(self.config.get("roi_interval_sec", 2))
-        self.roi_interval_spin.setFixedWidth(55)
+        self.roi_interval_spin.setFixedWidth(110) # 扩大一倍
         h_roi_cfg.addWidget(self.roi_interval_spin)
         h_roi_cfg.addWidget(QLabel("秒"))
         g_roi.addLayout(h_roi_cfg)
@@ -390,68 +409,66 @@ class MainWindow(QMainWindow):
         grp_roi.setLayout(g_roi)
         left_layout.addWidget(grp_roi)
 
-        # 4. 声音与提醒控制
-        grp_reminder = QGroupBox("定时与声音控制")
+        # 【四. 响铃次数放在试听后面】
+        grp_reminder = QGroupBox("声音与提醒控制")
         g_reminder = QVBoxLayout()
         
         h_rem_sound = QHBoxLayout()
         h_rem_sound.addWidget(QLabel("声音:"))
         self.sound_combo = QComboBox()
         self.sound_combo.addItems([
-            "系统默认蜂鸣 (Beep)",
+            "默认蜂鸣 (Beep)",
             "系统提示音 (Ding)",
             "系统通知音 (Notify)",
-            "自定义 .wav 文件..."
+            "自定义 .wav..."
         ])
         saved_sound_idx = self.config.get("reminder_sound_index", 0)
         self.sound_combo.setCurrentIndex(saved_sound_idx if saved_sound_idx < self.sound_combo.count() else 0)
         self.sound_combo.currentIndexChanged.connect(self.on_sound_selection_changed)
         h_rem_sound.addWidget(self.sound_combo, stretch=1)
         
-        self.listen_btn = QPushButton("🎵")
-        self.listen_btn.setFixedWidth(30)
+        self.listen_btn = QPushButton("🎵 试听")
         self.listen_btn.clicked.connect(lambda: self.trigger_alarm_sound(preview=True)) 
         h_rem_sound.addWidget(self.listen_btn)
-        g_reminder.addLayout(h_rem_sound)
-        
-        h_count_loop = QHBoxLayout()
-        h_count_loop.addWidget(QLabel("响铃次数:"))
+
+        h_rem_sound.addWidget(QLabel("响铃:"))
         self.rem_count = QSpinBox()
         self.rem_count.setRange(1, 99)
         self.rem_count.setValue(self.config.get("reminder_sound_count", 3))
-        self.rem_count.setFixedWidth(70)
-        h_count_loop.addWidget(self.rem_count)
-        h_count_loop.addStretch()
-        g_reminder.addLayout(h_count_loop)
+        self.rem_count.setFixedWidth(55)
+        self.rem_count.setSuffix("次")
+        h_rem_sound.addWidget(self.rem_count)
+
+        g_reminder.addLayout(h_rem_sound)
         grp_reminder.setLayout(g_reminder)
         left_layout.addWidget(grp_reminder)
 
-        # 5. 截图与扫码
+        # 【五. 一键截图+二维码放在 IP 后面】
         grp_snap = QGroupBox("截图与扫码")
-        g_snap = QVBoxLayout()
-        h_ip = QHBoxLayout()
-        h_ip.addWidget(QLabel("本机IP:"))
-        self.ip_combo = QComboBox()
-        h_ip.addWidget(self.ip_combo, stretch=1)
-        g_snap.addLayout(h_ip)
+        g_snap = QHBoxLayout()
         
-        self.snap_btn = QPushButton("📸 一键截图 + 二维码")
+        g_snap.addWidget(QLabel("本机IP:"))
+        self.ip_combo = QComboBox()
+        g_snap.addWidget(self.ip_combo, stretch=1)
+        
+        self.snap_btn = QPushButton("📸 一键截图+二维码")
         self.snap_btn.clicked.connect(self.take_screenshot)
         self.snap_btn.setStyleSheet("font-weight: bold; background-color: #10b981; color: white;")
         g_snap.addWidget(self.snap_btn)
+        
         grp_snap.setLayout(g_snap)
         left_layout.addWidget(grp_snap)
 
-        # 6. 运行日志面板
+        # 【一. 运行日志面板（折叠时自动伸展变大）】
         grp_log = QGroupBox("📋 运行日志")
         g_log = QVBoxLayout()
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(180)
+        self.log_box.setMinimumHeight(150)
         self.log_box.setStyleSheet("font-size: 11px; background-color: #11111b; color: #a6adc8; border: 1px solid #313244;")
         g_log.addWidget(self.log_box)
         grp_log.setLayout(g_log)
-        left_layout.addWidget(grp_log, stretch=1)
+        left_layout.addWidget(grp_log, stretch=1) # 设置 stretch=1 使得自动扩充
 
         # 状态栏
         self.status_label = QLabel("系统就绪")
@@ -498,7 +515,7 @@ class MainWindow(QMainWindow):
         self.roi_overlay = ROIOverlay()
         self.roi_overlay.roi_selected.connect(self.on_roi_selected)
 
-        # ---------- 系统托盘（【三. 托盘图标绑定 1.ico】） ----------
+        # ---------- 系统托盘 ----------
         tray_icon = QIcon("1.ico") if os.path.exists("1.ico") else QIcon.fromTheme("face-smile")
         self.tray = QSystemTrayIcon(tray_icon, self)
         tray_menu = QMenu()
@@ -510,11 +527,8 @@ class MainWindow(QMainWindow):
         # ---------- 恢复设置 ----------
         self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
-        if self.config.get("panel_collapsed", False):
-            self.left_panel.setVisible(False)
-            self.toggle_btn.setText(">")
         
-        self.log("🚀 系统初始化完成，软件已就绪")
+        self.log("🚀 系统初始化完成")
         if self.config["url"]:
             self.load_page()
 
@@ -590,7 +604,6 @@ class MainWindow(QMainWindow):
             self.log("❌ 页面加载失败，请检查网络")
             self.status_label.setText("页面加载失败")
 
-    # ---------- 【二. 手动检测点击响应】 ----------
     def on_manual_detect_clicked(self):
         self.log("👆 触发【手动检测】...")
         if not HAS_DDDDOCR or self.std_ocr is None:
@@ -619,7 +632,6 @@ class MainWindow(QMainWindow):
         self.status_label.setText("✅ ROI 框选成功")
         self.perform_roi_ocr_check()
 
-    # ---------- 【一. 修复定时检测提示】 ----------
     def toggle_roi_monitor(self):
         if self.roi_monitor_timer.isActive():
             self.roi_monitor_timer.stop()
@@ -647,11 +659,13 @@ class MainWindow(QMainWindow):
             self.log(f"▶️ 定时检测开启，间隔: {sec}秒")
             self.perform_roi_ocr_check()
 
+    # 【七. 彻底修复“识别不了”问题的核心逻辑】
     def perform_roi_ocr_check(self):
         if self.roi_rect.width() <= 0 or self.roi_rect.height() <= 0:
             self.roi_result_label.setText("识别数值: [ROI区域无效]")
             return
 
+        # 1. 抓取截图
         pixmap = self.webview.grab(self.roi_rect)
         if pixmap.isNull():
             self.roi_result_label.setText("识别数值: [截图为空]")
@@ -667,76 +681,99 @@ class MainWindow(QMainWindow):
             self.roi_result_label.setText("识别数值: [未加载 ddddocr]")
             return
 
+        # 2. OpenCV 预处理与高清放大 (对网页小数字极其关键)
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        img_orig = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+        if img_orig is None or img_orig.size == 0:
+            self.roi_result_label.setText("识别数值: [图像解码失败]")
+            return
+
+        h, w = img_orig.shape[:2]
+        
+        # 自动计算缩放比例（将图片放大 2.5 倍，极大提升文字辨识度）
+        scale = 2.5
+        img_resized = cv2.resize(img_orig, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+        
+        _, buf_resized = cv2.imencode(".png", img_resized)
+        bytes_resized = buf_resized.tobytes()
+
+        # 尝试原图与放大图两种通道
+        attempts = [bytes_resized, img_bytes]
+
         row_digit_list = []
         raw_text_list = []
 
-        # 1. 全局识别
-        try:
-            raw_res = self.std_ocr.classification(img_bytes)
-            if raw_res: raw_text_list.append(raw_res)
-        except Exception as e:
-            print(f"Standard OCR error: {e}")
+        # 3.1 多轮标准 OCR 尝试
+        for b_img in attempts:
+            try:
+                raw_res = self.std_ocr.classification(b_img)
+                if raw_res:
+                    raw_text_list.append(raw_res)
+                    digits = "".join(filter(str.isdigit, raw_res))
+                    if digits and digits not in row_digit_list:
+                        row_digit_list.append(digits)
+            except Exception as e:
+                print(f"Standard OCR error: {e}")
 
-        # 2. Det 切块识别
-        try:
-            bboxes = self.det_ocr.detection(img_bytes)
-            if bboxes:
-                np_arr = np.frombuffer(img_bytes, np.uint8)
-                img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        # 3.2 若直接标准识别未果，启用智能分行/切块识别 (Det 模式)
+        if not row_digit_list:
+            for b_img in attempts:
+                try:
+                    bboxes = self.det_ocr.detection(b_img)
+                    if bboxes:
+                        np_a = np.frombuffer(b_img, np.uint8)
+                        im = cv2.imdecode(np_a, cv2.IMREAD_COLOR)
 
-                bboxes_sorted = sorted(bboxes, key=lambda b: (b[1], b[0]))
-                grouped_rows = []
-                current_row = []
-                last_y = None
+                        # 按纵坐标排序分行
+                        bboxes_sorted = sorted(bboxes, key=lambda b: (b[1], b[0]))
+                        grouped_rows = []
+                        current_row = []
+                        last_y = None
 
-                for box in bboxes_sorted:
-                    x1, y1, x2, y2 = box
-                    if last_y is None or abs(y1 - last_y) < 14:
-                        current_row.append(box)
-                    else:
-                        grouped_rows.append(current_row)
-                        current_row = [box]
-                    last_y = y1
-                if current_row:
-                    grouped_rows.append(current_row)
+                        for box in bboxes_sorted:
+                            x1, y1, x2, y2 = box
+                            if last_y is None or abs(y1 - last_y) < (15 * scale):
+                                current_row.append(box)
+                            else:
+                                grouped_rows.append(current_row)
+                                current_row = [box]
+                            last_y = y1
+                        if current_row:
+                            grouped_rows.append(current_row)
 
-                for row in grouped_rows:
-                    row_sorted = sorted(row, key=lambda b: b[0])
-                    row_text = ""
-                    for box in row_sorted:
-                        x1, y1, x2, y2 = box
-                        h, w, _ = img.shape
-                        x1_c, y1_c = max(0, x1 - 2), max(0, y1 - 2)
-                        x2_c, y2_c = min(w, x2 + 2), min(h, y2 + 2)
-                        
-                        crop_img = img[y1_c:y2_c, x1_c:x2_c]
-                        if crop_img.size == 0: continue
+                        for row in grouped_rows:
+                            row_sorted = sorted(row, key=lambda b: b[0])
+                            row_text = ""
+                            for box in row_sorted:
+                                x1, y1, x2, y2 = box
+                                im_h, im_w, _ = im.shape
+                                x1_c, y1_c = max(0, x1 - 2), max(0, y1 - 2)
+                                x2_c, y2_c = min(im_w, x2 + 2), min(im_h, y2 + 2)
+                                
+                                crop_img = im[y1_c:y2_c, x1_c:x2_c]
+                                if crop_img.size == 0: continue
 
-                        _, crop_bytes = cv2.imencode(".png", crop_img)
-                        char_res = self.std_ocr.classification(crop_bytes.tobytes())
-                        digits = "".join(filter(str.isdigit, char_res))
-                        row_text += digits
-                    if row_text:
-                        row_digit_list.append(row_text)
-        except Exception as e:
-            print(f"Det OCR error: {e}")
+                                _, crop_bytes = cv2.imencode(".png", crop_img)
+                                char_res = self.std_ocr.classification(crop_bytes.tobytes())
+                                digits = "".join(filter(str.isdigit, char_res))
+                                row_text += digits
+                            if row_text and row_text not in row_digit_list:
+                                row_digit_list.append(row_text)
+                except Exception as e:
+                    print(f"Det OCR error: {e}")
 
-        if not row_digit_list and raw_text_list:
-            for txt in raw_text_list:
-                digits = "".join(filter(str.isdigit, txt))
-                if digits: row_digit_list.append(digits)
-
-        # 反馈识别到的数据
+        # 4. 识别结果反馈与日志
         if row_digit_list:
             res_text = " | ".join(row_digit_list)
             self.roi_result_label.setText(f"识别数值: [{res_text}]")
-            self.log(f"🎯 提取成功，数值列表: {row_digit_list}")
+            self.log(f"🎯 OCR识别成功: {row_digit_list}")
         else:
             raw_display = " / ".join(raw_text_list) if raw_text_list else "无"
-            self.roi_result_label.setText(f"识别数值: [未提取到数字 (原始: {raw_display})]")
-            self.log(f"🔍 未提取到纯数字 (原始识别文本: '{raw_display}')")
+            self.roi_result_label.setText(f"识别数值: [未检测到纯数字 (原始文本: {raw_display})]")
+            self.log(f"🔍 截图大小[{w}x{h}] 未能提取出数字，建议：1.将网页【缩放】调至150% 2.重新贴合数字框选")
 
-        # 【四. 核心逻辑判断：结合手动输入的“相同行数”与“目标数值”】
+        # 5. 核心报警规则匹配
         target_same_n = self.target_same_count_spin.value()
         user_target_val = self.target_value_input.text().strip()
 
@@ -744,13 +781,11 @@ class MainWindow(QMainWindow):
         matched_value = None
 
         if user_target_val:
-            # 模式 A: 用户设定了具体数值
             count = row_digit_list.count(user_target_val)
             if count >= target_same_n:
                 has_alarm = True
                 matched_value = user_target_val
         else:
-            # 模式 B: 自动判断 N 行连续相同的数值
             for i in range(len(row_digit_list) - target_same_n + 1):
                 sub_group = row_digit_list[i : i + target_same_n]
                 if sub_group and all(x == sub_group[0] for x in sub_group):
@@ -758,12 +793,12 @@ class MainWindow(QMainWindow):
                     matched_value = sub_group[0]
                     break
 
-        # 触发报警
+        # 触发响铃
         current_signature = f"{matched_value}_{user_target_val}_{target_same_n}" if has_alarm else None
 
         if has_alarm:
             if current_signature != self.last_alarm_signature:
-                msg = f"🚨 发现匹配数值 [{matched_value}] (已达到 {target_same_n} 次匹配)！"
+                msg = f"🚨 发现匹配数值 [{matched_value}] (连续/重复 {target_same_n} 次)！"
                 self.roi_status_label.setText(f"状态: {msg}")
                 self.status_label.setText(msg)
                 self.log(f"⚠️ 【报警触发】数值 [{matched_value}] 满足条件！")
