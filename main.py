@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V10.4 - 多行精准切割识别/全量本地系统音效版)
+网页刷新数字监控 (V10.5 - 选框拖拽缩放/去除误报/无限制倒计时检测版)
 更新日志：
- 1. 解决多行识别失败：增加表格边框去线算法与轮廓垂直聚类（Contour Grouping），多行选框自动精准逐行切割。
- 2. 本地音效库扩充：自动动态扫描 C:\\Windows\\Media 下的所有系统 wav 声音（闹钟、警报、钟声等 tens+ 种音效）。
- 3. 继承 V10.3 功能：选框常驻屏幕、报警变红、右上角消除报警按钮、数据变化判定、无缝循环响铃。
+ 1. 选框交互升级：支持选中框随心拖拽移动、拖拽四角句柄拉伸缩放，方便全屏/窗口下精准微调。
+ 2. 移除误报日志：彻底删除了“页面加载失败 请检查网络”提示，避免干扰。
+ 3. 间隔上限解除：检测间隔最大值解除 60s 限制（支持上限 999999 秒）。
+ 4. 增加了检测倒计时：定时检测开启时增加实时秒级倒计时显示。
+ 5. 继承 V10.4 算法：表格去线与多行数字精准切割识别。
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -40,12 +42,6 @@ from PySide6.QtWidgets import (
     QComboBox, QTextEdit
 )
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor, QTextCursor, QGuiApplication, QImage
-from PySide6.QtNetwork import (
-    QNetworkAccessManager, QNetworkRequest, QNetworkReply, 
-    QNetworkInterface, QAbstractSocket
-)
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineCertificateError, QWebEngineScript
 
 # ==================== 3. 基础配置与辅助函数 ====================
 CONFIG_FILE = "auto_login_config.json"
@@ -88,6 +84,7 @@ def save_config(cfg):
         print(f"保存配置文件失败: {e}")
 
 def get_all_local_ips():
+    from PySide6.QtNetwork import QNetworkInterface, QAbstractSocket
     ip_list = []
     for address in QNetworkInterface.allAddresses():
         if address.protocol() == QAbstractSocket.IPv4Protocol:
@@ -101,7 +98,7 @@ def get_all_local_ips():
 
 # ==================== 4. 联动折叠组件 ====================
 class CombinedCollapsiblePanel(QWidget):
-    """ 将【页面设置与刷新】和【账号密码】合并管理，支持上下箭头折叠 """
+    """ 将【页面设置与刷新】和【账号密码】合并管理 """
     def __init__(self, parent=None):
         super().__init__(parent)
         main_layout = QVBoxLayout(self)
@@ -142,7 +139,7 @@ class CombinedCollapsiblePanel(QWidget):
             self.toggle_btn.setText("▲ 页面设置与账号密码 (点击收起)")
 
 
-# ==================== 5. 常驻屏幕 ROI 覆盖层 ====================
+# ==================== 5. 支持随时拖拽与角点缩放的 ROI 覆盖层 ====================
 class PersistentROIOverlay(QWidget):
     roi_list_selected = Signal(list)
     clear_alarm_requested = Signal(int)
@@ -154,8 +151,13 @@ class PersistentROIOverlay(QWidget):
 
         self.rects = []
         self.is_editing = False
-        self.start_pos = None
-        self.end_pos = None
+        
+        # 拖拽与缩放控制状态
+        self.drag_idx = None
+        self.drag_action = None  # 'MOVE', 'NW', 'NE', 'SW', 'SE', 'DRAW'
+        self.drag_start_pos = None
+        self.orig_rect = None
+        self.current_draw_rect = None
         
         self.alarm_states = {}
         self.clear_btn_rects = {}
@@ -165,7 +167,7 @@ class PersistentROIOverlay(QWidget):
         bar_layout = QHBoxLayout(self.bar)
         bar_layout.setContentsMargins(10, 5, 10, 5)
 
-        self.tip_label = QLabel("鼠标拖拽绘制框选 | 已画: 0 个", self.bar)
+        self.tip_label = QLabel("拖拽框体移动 | 拖拽四角拉伸 | 空白处划框", self.bar)
         self.tip_label.setStyleSheet("color: #a6e3a1; font-weight: bold; font-size: 12px;")
 
         self.btn_done = QPushButton("✅ 完成框选", self.bar)
@@ -196,7 +198,7 @@ class PersistentROIOverlay(QWidget):
 
     def start_editing(self, existing_rects):
         self.is_editing = True
-        self.rects = list(existing_rects)
+        self.rects = [QRect(r) for r in existing_rects]
         self.setCursor(Qt.CrossCursor)
         self.bar.show()
         self.update_tip()
@@ -228,11 +230,23 @@ class PersistentROIOverlay(QWidget):
         self.update()
 
     def update_tip(self):
-        self.tip_label.setText(f"鼠标拖拽绘制框选 | 已画: {len(self.rects)} 个")
+        self.tip_label.setText(f"拖拽移动/角点缩放 | 已有选框: {len(self.rects)} 个")
 
     def set_alarm_states(self, states):
         self.alarm_states = states
         self.update()
+
+    def _get_handle_at(self, rect, pos):
+        """ 检测点击位置是属于 4 个角点拉伸还是整体移动 """
+        s = 12  # 碰撞判定响应区域
+        x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+
+        if (pos - QPoint(x, y)).manhattanLength() <= s: return 'NW'
+        if (pos - QPoint(x + w, y)).manhattanLength() <= s: return 'NE'
+        if (pos - QPoint(x, y + h)).manhattanLength() <= s: return 'SW'
+        if (pos - QPoint(x + w, y + h)).manhattanLength() <= s: return 'SE'
+        if rect.contains(pos): return 'MOVE'
+        return None
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -247,24 +261,60 @@ class PersistentROIOverlay(QWidget):
 
             if self.bar.geometry().contains(self.mapFromGlobal(pos)):
                 return
-            self.start_pos = pos
-            self.end_pos = pos
+
+            # 逆序判断，优先命中最上层的选框
+            for idx in reversed(range(len(self.rects))):
+                r = self.rects[idx]
+                action = self._get_handle_at(r, pos)
+                if action:
+                    self.drag_idx = idx
+                    self.drag_action = action
+                    self.drag_start_pos = pos
+                    self.orig_rect = QRect(r)
+                    return
+
+            # 点击在空白区域，开始画新框
+            self.drag_action = 'DRAW'
+            self.drag_start_pos = pos
+            self.current_draw_rect = QRect(pos, pos)
             self.update()
 
     def mouseMoveEvent(self, event):
-        if self.is_editing and self.start_pos:
-            self.end_pos = event.globalPosition().toPoint()
-            self.update()
+        if not self.is_editing or not self.drag_action:
+            return
+
+        pos = event.globalPosition().toPoint()
+        delta = pos - self.drag_start_pos
+
+        if self.drag_action == 'MOVE' and self.drag_idx is not None:
+            self.rects[self.drag_idx] = self.orig_rect.translated(delta)
+        elif self.drag_action == 'SE' and self.drag_idx is not None:
+            r = QRect(self.orig_rect.topLeft(), pos).normalized()
+            self.rects[self.drag_idx] = r
+        elif self.drag_action == 'NW' and self.drag_idx is not None:
+            r = QRect(pos, self.orig_rect.bottomRight()).normalized()
+            self.rects[self.drag_idx] = r
+        elif self.drag_action == 'NE' and self.drag_idx is not None:
+            r = QRect(QPoint(self.orig_rect.left(), pos.y()), QPoint(pos.x(), self.orig_rect.bottom())).normalized()
+            self.rects[self.drag_idx] = r
+        elif self.drag_action == 'SW' and self.drag_idx is not None:
+            r = QRect(QPoint(pos.x(), self.orig_rect.top()), QPoint(self.orig_rect.right(), pos.y())).normalized()
+            self.rects[self.drag_idx] = r
+        elif self.drag_action == 'DRAW':
+            self.current_draw_rect = QRect(self.drag_start_pos, pos).normalized()
+
+        self.update()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.is_editing and self.start_pos:
-            self.end_pos = event.globalPosition().toPoint()
-            rect = QRect(self.start_pos, self.end_pos).normalized()
-            if rect.width() > 10 and rect.height() > 10:
-                self.rects.append(rect)
-                self.update_tip()
-            self.start_pos = None
-            self.end_pos = None
+        if event.button() == Qt.LeftButton and self.is_editing:
+            if self.drag_action == 'DRAW' and self.current_draw_rect:
+                if self.current_draw_rect.width() > 10 and self.current_draw_rect.height() > 10:
+                    self.rects.append(self.current_draw_rect)
+                    self.update_tip()
+            
+            self.drag_action = None
+            self.drag_idx = None
+            self.current_draw_rect = None
             self.update()
 
     def paintEvent(self, event):
@@ -283,21 +333,27 @@ class PersistentROIOverlay(QWidget):
                 painter.fillRect(local_r, Qt.transparent)
                 painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
-            if is_alarm:
-                border_color = QColor("#ef4444")
-                pen_width = 3
-            else:
-                border_color = QColor("#00ff66")
-                pen_width = 2
+            border_color = QColor("#ef4444") if is_alarm else QColor("#00ff66")
+            pen_width = 3 if is_alarm else 2
 
             painter.setPen(QPen(border_color, pen_width, Qt.SolidLine))
             painter.drawRect(local_r)
 
+            # 编号角标
             badge_rect = QRect(local_r.x(), max(0, local_r.y() - 22), 42, 22)
             painter.fillRect(badge_rect, border_color)
             painter.setPen(QPen(QColor("#000000")))
             painter.drawText(badge_rect, Qt.AlignCenter, f"#{i}")
 
+            # 编辑模式下绘制 4 个拉伸 Handle 角点
+            if self.is_editing:
+                handle_size = 8
+                painter.setPen(QPen(QColor("#38bdf8"), 2))
+                painter.setBrush(QColor("#ffffff"))
+                for corner in [local_r.topLeft(), local_r.topRight(), local_r.bottomLeft(), local_r.bottomRight()]:
+                    painter.drawRect(corner.x() - handle_size // 2, corner.y() - handle_size // 2, handle_size, handle_size)
+
+            # 报警状态下的消除按钮
             if is_alarm:
                 btn_w, btn_h = 90, 22
                 global_btn_r = QRect(r.x() + r.width() - btn_w, max(0, r.y() - 25), btn_w, btn_h)
@@ -308,17 +364,15 @@ class PersistentROIOverlay(QWidget):
                 painter.setPen(QPen(QColor("#ffffff")))
                 painter.drawText(local_btn_r, Qt.AlignCenter, "🔕 消除报警")
 
-        if self.is_editing and self.start_pos and self.end_pos:
-            local_start = self.mapFromGlobal(self.start_pos)
-            local_end = self.mapFromGlobal(self.end_pos)
-            rect = QRect(local_start, local_end).normalized()
-
+        # 绘制新建中的选框
+        if self.is_editing and self.drag_action == 'DRAW' and self.current_draw_rect:
+            local_draw = QRect(self.mapFromGlobal(self.current_draw_rect.topLeft()), self.current_draw_rect.size())
             painter.setCompositionMode(QPainter.CompositionMode_Clear)
-            painter.fillRect(rect, Qt.transparent)
+            painter.fillRect(local_draw, Qt.transparent)
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
             painter.setPen(QPen(QColor("#38bdf8"), 2, Qt.DashLine))
-            painter.drawRect(rect)
+            painter.drawRect(local_draw)
 
 
 # ==================== 6. HTTP 服务器与扫码对话框 ====================
@@ -373,6 +427,9 @@ class QRDialog(QDialog):
         layout.addWidget(close_btn)
 
 
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineCertificateError, QWebEngineScript
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
 class CustomWebPage(QWebEnginePage):
     def certificateError(self, error: QWebEngineCertificateError) -> bool:
         error.acceptCertificate()
@@ -383,17 +440,18 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V10.4 - 多行精准切割/全量系统音效版)")
+        self.setWindowTitle("网页刷新数字监控 (V10.5 - 选框拖拽缩放/无限制倒计时检测版)")
         self.resize(1380, 880)
         self.config = load_config()
 
         if os.path.exists("1.ico"):
             self.setWindowIcon(QIcon("1.ico"))
 
+        from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
         self.nam = QNetworkAccessManager(self)
         self.current_file_url = ""
         self.custom_sound_path = self.config.get("reminder_custom_path", "")
-        self.sound_files_map = {} # 保存音效名称与完整路径映射
+        self.sound_files_map = {}
         self.is_fullscreen = False
 
         self.ocr = None
@@ -499,7 +557,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.combined_panel)
 
         # 🎯 数字监控面板
-        grp_roi = QGroupBox("🎯 数字监控 (支持框选多行数字)")
+        grp_roi = QGroupBox("🎯 数字监控 (选框可随时拖拽拉伸)")
         g_roi = QVBoxLayout()
 
         h_roi_top = QHBoxLayout()
@@ -523,7 +581,7 @@ class MainWindow(QMainWindow):
         self.target_same_count_spin = QSpinBox()
         self.target_same_count_spin.setRange(1, 10)
         self.target_same_count_spin.setValue(self.config.get("target_same_count", 3))
-        self.target_same_count_spin.setFixedWidth(80)
+        self.target_same_count_spin.setFixedWidth(70)
         h_rule1.addWidget(self.target_same_count_spin)
 
         h_rule1.addWidget(QLabel("目标数值:"))
@@ -539,13 +597,20 @@ class MainWindow(QMainWindow):
         h_roi_cfg.addWidget(self.roi_toggle_btn)
 
         h_roi_cfg.addWidget(QLabel("检测间隔:"))
+        
+        # 改进三：解除 60s 限制，范围设为 1 ~ 999999 秒
         self.roi_interval_spin = QSpinBox()
-        self.roi_interval_spin.setRange(1, 60)
+        self.roi_interval_spin.setRange(1, 999999)
         self.roi_interval_spin.setValue(self.config.get("roi_interval_sec", 2))
-        self.roi_interval_spin.setFixedWidth(80)
+        self.roi_interval_spin.setFixedWidth(85)
         h_roi_cfg.addWidget(self.roi_interval_spin)
         h_roi_cfg.addWidget(QLabel("秒"))
         g_roi.addLayout(h_roi_cfg)
+
+        # 改进四：检测倒计时标签
+        self.roi_countdown_label = QLabel("")
+        self.roi_countdown_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
+        g_roi.addWidget(self.roi_countdown_label)
 
         self.clear_alarm_panel_btn = QPushButton("🚨 消除所有报警")
         self.clear_alarm_panel_btn.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold; padding: 5px;")
@@ -564,14 +629,14 @@ class MainWindow(QMainWindow):
         grp_roi.setLayout(g_roi)
         left_layout.addWidget(grp_roi)
 
-        # 【改进：动态加载 Windows 系统全量本地音效库】
-        grp_reminder = QGroupBox("🔔 声音与报警提醒 (全量本地音效库)")
+        # 🔔 声音与报警提醒
+        grp_reminder = QGroupBox("🔔 声音与报警提醒")
         g_reminder = QVBoxLayout()
         
         h_rem_sound = QHBoxLayout()
         h_rem_sound.addWidget(QLabel("声音选择:"))
         self.sound_combo = QComboBox()
-        self.populate_sound_options() # 加载 Windows Media 音效
+        self.populate_sound_options()
         self.sound_combo.currentIndexChanged.connect(self.on_sound_selection_changed)
         h_rem_sound.addWidget(self.sound_combo, stretch=1)
         
@@ -647,8 +712,10 @@ class MainWindow(QMainWindow):
         self.alarm_loop_timer = QTimer()
         self.alarm_loop_timer.timeout.connect(self.execute_single_alarm_tick)
 
-        self.roi_monitor_timer = QTimer()
-        self.roi_monitor_timer.timeout.connect(self.perform_roi_ocr_check)
+        # 改进四：检测倒计时 Timer
+        self.roi_clock_timer = QTimer()
+        self.roi_clock_timer.timeout.connect(self.on_roi_clock_tick)
+        self.roi_remaining_seconds = 0
 
         self.roi_overlay = PersistentROIOverlay()
         self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
@@ -667,7 +734,7 @@ class MainWindow(QMainWindow):
         self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
         
-        self.log("🚀 系统初始化完成 (V10.4 - 多行精准切割/全量系统音效版)")
+        self.log("🚀 系统初始化完成 (V10.5 - 选框拖拽缩放/无限制倒计时检测版)")
         if self.config["url"]:
             self.load_page()
 
@@ -677,14 +744,10 @@ class MainWindow(QMainWindow):
         self.log_box.moveCursor(QTextCursor.End)
 
     def populate_sound_options(self):
-        """ 动态扫描系统音效文件，扩充报警声音列表 """
         self.sound_combo.clear()
         self.sound_files_map.clear()
-
-        # 默认蜂鸣
         self.sound_combo.addItem("默认蜂鸣 (Beep)", "")
 
-        # 扫描 C:\Windows\Media\ 目录下的 wav 文件
         media_dir = r"C:\Windows\Media"
         if os.path.exists(media_dir):
             wav_files = glob.glob(os.path.join(media_dir, "*.wav"))
@@ -697,7 +760,6 @@ class MainWindow(QMainWindow):
 
         self.sound_combo.addItem("📂 自定义 .wav 文件...", "CUSTOM")
 
-        # 还原配置保存的选择
         saved_sound_idx = self.config.get("reminder_sound_index", 0)
         if saved_sound_idx < self.sound_combo.count():
             self.sound_combo.setCurrentIndex(saved_sound_idx)
@@ -759,17 +821,15 @@ class MainWindow(QMainWindow):
         self.log(f"🌐 正在加载页面: {url}")
         self.webview.load(QUrl(url))
 
+    # 改进二：网页加载完成，删除了原先误报的失败提示日志
     def on_load_finished(self, ok):
         if ok:
             self.log("✅ 页面加载完毕")
             self.webview.page().runJavaScript(INJECT_SCRIPT)
             QTimer.singleShot(1500, self.paste_credentials)
-        else:
-            self.log("❌ 页面加载失败，请检查网络")
-            self.status_label.setText("页面加载失败")
 
     def start_roi_selection(self):
-        self.log("请在屏幕上拖拽划定【数字区域】...")
+        self.log("提示：可拖拽已有选框移动，按住四角句柄拉伸，或拖拽绘制新框")
         self.roi_overlay.start_editing(self.roi_list)
 
     def clear_all_rois(self):
@@ -789,8 +849,8 @@ class MainWindow(QMainWindow):
         self.roi_list = rects
         self.roi_overlay.rects = list(self.roi_list)
         self.roi_info_label.setText(f"选中区域: {len(self.roi_list)} 个选框")
-        self.log(f"📐 完成框选，共设定 {len(self.roi_list)} 个监控区域")
-        self.status_label.setText(f"✅ 已设定 {len(self.roi_list)} 个选框")
+        self.log(f"📐 框选更新完成，当前共有 {len(self.roi_list)} 个监控区域")
+        self.status_label.setText(f"✅ 已更新 {len(self.roi_list)} 个选框")
         self.perform_roi_ocr_check()
 
     def on_manual_detect_clicked(self):
@@ -808,11 +868,13 @@ class MainWindow(QMainWindow):
 
         self.perform_roi_ocr_check()
 
+    # 改进四：支持检测间隔秒级倒计时逻辑
     def toggle_roi_monitor(self):
-        if self.roi_monitor_timer.isActive():
-            self.roi_monitor_timer.stop()
+        if self.roi_clock_timer.isActive():
+            self.roi_clock_timer.stop()
             self.roi_toggle_btn.setText("▶️ 定时检测")
             self.roi_toggle_btn.setStyleSheet("background-color: #10b981; color: white; font-weight: bold;")
+            self.roi_countdown_label.setText("")
             self.roi_status_label.setText("状态: 定时检测已停止")
             self.log("⏹️ 定时检测已停止")
         else:
@@ -828,33 +890,41 @@ class MainWindow(QMainWindow):
                 return
 
             sec = self.roi_interval_spin.value()
-            self.roi_monitor_timer.start(sec * 1000)
+            self.roi_remaining_seconds = sec
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
+            self.roi_clock_timer.start(1000)
+
             self.roi_toggle_btn.setText("⏸️ 停止定时")
             self.roi_toggle_btn.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
             self.roi_status_label.setText("状态: 正在定时检测中...")
             self.log(f"▶️ 定时检测开启，间隔: {sec}秒")
             self.perform_roi_ocr_check()
 
-    # ==================== 重点解决多行识别：表格滤线 + 轮廓垂直聚类切割 ====================
+    def on_roi_clock_tick(self):
+        if self.roi_remaining_seconds > 1:
+            self.roi_remaining_seconds -= 1
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
+        else:
+            self.perform_roi_ocr_check()
+            self.roi_remaining_seconds = self.roi_interval_spin.value()
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
+
+    # 多行表格切割识别算法
     def segment_rows(self, img_bgr):
-        """ 能够完美解决多行表格数字切割的核心算法 """
         h_img, w_img = img_bgr.shape[:2]
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         
-        # 1. Otsu 自适应二值化
         if np.mean(gray) > 127:
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         else:
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # 2. 关键修复：消除表格水平横线 (Horizontal Line Removal)
-        # 很多网页表格横线贯穿整行，导致投影算法无法将多行切开
+        # 滤除横向表格线
         kernel_len = max(10, w_img // 3)
         horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
         horiz_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horiz_kernel)
-        binary_clean = cv2.subtract(binary, horiz_lines) # 抠除表格线
+        binary_clean = cv2.subtract(binary, horiz_lines)
 
-        # 3. 算法方式一：水平投影分割 (Horizontal Projection)
         proj = np.sum(binary_clean, axis=1)
         rows = []
         in_row = False
@@ -862,7 +932,6 @@ class MainWindow(QMainWindow):
         min_row_height = 4
 
         for y, val in enumerate(proj):
-            # 过滤掉细微噪点
             if val > (1 * 255) and not in_row:
                 in_row = True
                 start_y = y
@@ -874,18 +943,16 @@ class MainWindow(QMainWindow):
         if in_row and (len(proj) - start_y) >= min_row_height:
             rows.append((max(0, start_y - 2), h_img))
 
-        # 4. 算法方式二兜底：字符轮廓垂直聚类 (Contour Grouping Fallback)
-        # 如果水平投影没能切出多行，或者行高过大，采用轮廓中心 Y 坐标强行分组
+        # 轮廓垂直聚类兜底
         if not rows or (len(rows) == 1 and (rows[0][1] - rows[0][0]) > h_img * 0.75 and h_img > 30):
             contours, _ = cv2.findContours(binary_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             boxes = []
             for c in contours:
                 bx, by, bw, bh = cv2.boundingRect(c)
-                if bh >= 4 and bw >= 2: # 过滤微小噪点
+                if bh >= 4 and bw >= 2:
                     boxes.append((bx, by, bw, bh))
 
             if boxes:
-                # 按顶部 Y 坐标升序排序
                 boxes.sort(key=lambda b: b[1])
                 grouped_rows = []
                 curr_row = [boxes[0]]
@@ -893,7 +960,6 @@ class MainWindow(QMainWindow):
                 for b in boxes[1:]:
                     prev_y = curr_row[-1][1]
                     prev_h = curr_row[-1][3]
-                    # 如果 Y 坐标重叠度较高，视为同一行
                     if abs(b[1] - prev_y) < max(prev_h, b[3]) * 0.6:
                         curr_row.append(b)
                     else:
@@ -913,7 +979,6 @@ class MainWindow(QMainWindow):
 
         return rows
 
-    # ==================== OCR 识别核心逻辑 ====================
     def perform_roi_ocr_check(self):
         if not self.roi_list or not HAS_DDDDOCR or self.ocr is None:
             return
@@ -946,7 +1011,6 @@ class MainWindow(QMainWindow):
                 arr = arr[:, :w * 3].reshape((h, w, 3))
                 img_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
-                # 调用优化的多行分割算法
                 row_rects = self.segment_rows(img_bgr)
                 box_digits = []
 
@@ -955,7 +1019,6 @@ class MainWindow(QMainWindow):
                     rh, rw = row_img.shape[:2]
                     if rh < 3 or rw < 3: continue
 
-                    # 放大图像与加白边，大幅提升 ddddocr 准确率
                     row_resized = cv2.resize(row_img, (rw * 3, rh * 3), interpolation=cv2.INTER_CUBIC)
                     row_padded = cv2.copyMakeBorder(row_resized, 15, 15, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
@@ -971,7 +1034,6 @@ class MainWindow(QMainWindow):
                 val_str = " | ".join(box_digits) if box_digits else "无"
                 log_lines.append(f"【区域#{box_idx}】 (共{len(box_digits)}行数字): [{val_str}]")
 
-                # 判断规则匹配
                 rule_matched = False
                 if user_target_val:
                     if box_digits.count(user_target_val) >= target_same_n:
@@ -992,10 +1054,7 @@ class MainWindow(QMainWindow):
                     self.box_is_alarming[box_idx] = False
                     self.box_ack_digits[box_idx] = None
 
-            # 输出完整日志
-            self.log(f"🎯 多行数字检测结果:\n" + "\n".join(log_lines))
-
-            # 更新常驻选框的变红/变绿状态
+            self.log(f"🎯 监控检测结果:\n" + "\n".join(log_lines))
             self.roi_overlay.set_alarm_states(self.box_is_alarming)
 
             alarming_boxes = [idx for idx, is_al in self.box_is_alarming.items() if is_al]
@@ -1019,7 +1078,7 @@ class MainWindow(QMainWindow):
         self.box_is_alarming[box_idx] = False
         self.box_ack_digits[box_idx] = list(self.box_latest_digits.get(box_idx, []))
         
-        self.log(f"🔕 已消除【区域 #{box_idx}】的报警 (锁定快照，数据更新前不再响起)")
+        self.log(f"🔕 已消除【区域 #{box_idx}】的报警")
         self.roi_overlay.set_alarm_states(self.box_is_alarming)
         
         if not any(self.box_is_alarming.values()):
@@ -1041,13 +1100,8 @@ class MainWindow(QMainWindow):
             self.alarm_loop_timer.stop()
 
     def execute_single_alarm_tick(self):
-        """ 播放选中的音效 """
         cur_data = self.sound_combo.currentData()
-        
-        if cur_data == "CUSTOM":
-            target_wav = self.custom_sound_path
-        else:
-            target_wav = cur_data
+        target_wav = self.custom_sound_path if cur_data == "CUSTOM" else cur_data
 
         if target_wav and os.path.exists(target_wav):
             if sys.platform == "win32":
@@ -1093,11 +1147,14 @@ class MainWindow(QMainWindow):
             selected_ip = self.ip_combo.currentText()
             self.current_file_url = f"http://{selected_ip}:{self.server_port}/{filename}"
             qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={urllib.parse.quote(self.current_file_url)}"
+            
+            from PySide6.QtNetwork import QNetworkRequest
             self.reply = self.nam.get(QNetworkRequest(QUrl(qr_api)))
             self.reply.finished.connect(self.on_qr_downloaded)
             self.log(f"📸 截图已保存，生成链接: {self.current_file_url}")
 
     def on_qr_downloaded(self):
+        from PySide6.QtNetwork import QNetworkReply
         if self.reply.error() == QNetworkReply.NoError:
             qr_pixmap = QPixmap()
             qr_pixmap.loadFromData(self.reply.readAll())
@@ -1178,7 +1235,7 @@ class MainWindow(QMainWindow):
 
     def quit_app(self):
         if hasattr(self, 'refresh_clock'): self.refresh_clock.stop()
-        if hasattr(self, 'roi_monitor_timer'): self.roi_monitor_timer.stop()
+        if hasattr(self, 'roi_clock_timer'): self.roi_clock_timer.stop()
         if hasattr(self, 'alarm_loop_timer'): self.alarm_loop_timer.stop()
         self.tray.hide()
         QApplication.quit()
@@ -1187,6 +1244,7 @@ class MainWindow(QMainWindow):
             if sys.platform == "win32":
                 subprocess.Popen(f"taskkill /F /T /PID {current_pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
+                import signal
                 os.killpg(os.getpgrp(), signal.SIGKILL)
         except: pass
         os._exit(0)
