@@ -25,7 +25,7 @@ jobs:
 
     - name: 使用 PyInstaller 打包应用
       run: |
-        pyinstaller --noconfirm --onedir --windowed --name "网页刷新数字监控" main.py
+        pyinstaller --noconfirm --onedir --windowed --collect-data ddddocr --add-data "1.ico;." --icon="1.ico" --name "网页刷新数字监控" main.py
 
     - name: 上传构建产物 EXE
       uses: actions/upload-artifact@v4
