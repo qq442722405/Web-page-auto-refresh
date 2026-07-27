@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V10.7 - 纯手动输入/实时回车/极简折叠版)
+网页刷新数字监控 (V10.8 - 增量智能防重报警版)
 更新日志：
- 1. 取消延时提交：一键粘贴后直接触发 Enter 键，方便后续手动输入验证码。
- 2. 隐藏上下箭头：清除所有 SpinBox 的上下调节按钮，仅保留手动输入框。
- 3. 极简折叠布局：把【截图扫码】与【保存配置】全部纳入折叠框，收起后仅保留【数字监控】与【日志】。
+ 1. 增量消除逻辑：彻底解决消除报警后，因表格每2小时新增行导致旧报警重复触发的问题。
+ 2. 目标数值记忆：记录已消除的目标数值出现次数，未新增目标数值不报警。
+ 3. 相同行数记忆：记录已消除的匹配位置特征，追加新行时不触发旧位置报警。
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -94,9 +94,8 @@ def get_all_local_ips():
     return sorted(list(set(ip_list)))
 
 
-# ==================== 4. 改进三：全功能收起/展开折叠面板 ====================
+# ==================== 4. 全功能收起/展开折叠面板 ====================
 class CombinedCollapsiblePanel(QWidget):
-    """ 将【页面设置】、【账号密码】、【声音报警】、【截图扫码】与【保存配置】全部收起 """
     def __init__(self, parent=None):
         super().__init__(parent)
         main_layout = QVBoxLayout(self)
@@ -137,7 +136,7 @@ class CombinedCollapsiblePanel(QWidget):
             self.toggle_btn.setText("▲ 基础配置与设置 (点击收起面板)")
 
 
-# ==================== 5. 选框带 ⚙️/✅完成 按钮的 ROI 覆盖层 ====================
+# ==================== 5. ROI 覆盖层 ====================
 class PersistentROIOverlay(QWidget):
     roi_list_selected = Signal(list)
     clear_alarm_requested = Signal(int)
@@ -457,7 +456,7 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V10.7 - 纯手动输入/实时回车/极简折叠版)")
+        self.setWindowTitle("网页刷新数字监控 (V10.8 - 增量智能防重报警版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -477,8 +476,10 @@ class MainWindow(QMainWindow):
         saved_roi_list = self.config.get("roi_list", [[100, 100, 300, 200]])
         self.roi_list = [QRect(r[0], r[1], r[2], r[3]) for r in saved_roi_list]
 
+        # 核心变动：新增已记忆消报的数量与组合特征，防止重复报警
         self.box_latest_digits = {}
-        self.box_ack_digits = {}
+        self.box_ack_count = {}      # {box_idx: int} 为目标数值模式存储已消除的数量
+        self.box_ack_matches = {}    # {box_idx: set()} 为连续行模式存储已消除的签名特征
         self.box_is_alarming = {}
 
         self.start_local_server()
@@ -495,7 +496,7 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
 
-        # 改进三：折叠面板组件
+        # 折叠面板组件
         self.combined_panel = CombinedCollapsiblePanel()
         
         # 1. 页面设置与刷新
@@ -517,7 +518,7 @@ class MainWindow(QMainWindow):
         h_opts = QHBoxLayout()
         h_opts.addWidget(QLabel("缩放:"))
         self.zoom_spin = QSpinBox()
-        self.zoom_spin.setButtonSymbols(QAbstractSpinBox.NoButtons) # 改进二：清除上下箭头
+        self.zoom_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.zoom_spin.setRange(25, 300)
         self.zoom_spin.setValue(int(self.config.get("zoom_level", 1.0) * 100))
         self.zoom_spin.setFixedWidth(45)
@@ -527,7 +528,7 @@ class MainWindow(QMainWindow):
 
         h_opts.addWidget(QLabel("刷新间隔:"))
         self.auto_interval = QSpinBox()
-        self.auto_interval.setButtonSymbols(QAbstractSpinBox.NoButtons) # 改进二：清除上下箭头
+        self.auto_interval.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.auto_interval.setRange(1, 3600)
         self.auto_interval.setValue(self.config.get("auto_interval", 60))
         self.auto_interval.setFixedWidth(45)
@@ -585,7 +586,7 @@ class MainWindow(QMainWindow):
         g_reminder.addLayout(h_rem_sound)
         self.combined_panel.container_layout.addWidget(grp_reminder)
 
-        # 4. 改进三：截图与扫码放入折叠框
+        # 4. 截图与扫码
         grp_snap = QGroupBox("四. 截图与扫码")
         g_snap = QHBoxLayout(grp_snap)
         
@@ -600,16 +601,16 @@ class MainWindow(QMainWindow):
         
         self.combined_panel.container_layout.addWidget(grp_snap)
 
-        # 5. 改进三：保存配置按钮放入折叠框
+        # 5. 保存配置按钮
         self.save_btn = QPushButton("💾 保存基础配置")
         self.save_btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white; padding: 6px; font-size: 12px; border-radius: 4px;")
         self.save_btn.clicked.connect(self.save_settings)
         self.combined_panel.container_layout.addWidget(self.save_btn)
 
-        # 将全功能折叠面板加入左侧主布局
+        # 折叠面板加入左侧主布局
         left_layout.addWidget(self.combined_panel)
 
-        # 6. 🎯 数字监控面板（折叠后依然保留在主界面）
+        # 6. 🎯 数字监控面板
         grp_roi = QGroupBox("🎯 数字监控 (选框可随时拖拽拉伸/齿轮调整)")
         g_roi = QVBoxLayout()
 
@@ -632,7 +633,7 @@ class MainWindow(QMainWindow):
         h_rule1 = QHBoxLayout()
         h_rule1.addWidget(QLabel("相同行数:"))
         self.target_same_count_spin = QSpinBox()
-        self.target_same_count_spin.setButtonSymbols(QAbstractSpinBox.NoButtons) # 改进二：清除上下箭头
+        self.target_same_count_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.target_same_count_spin.setRange(1, 10)
         self.target_same_count_spin.setValue(self.config.get("target_same_count", 3))
         self.target_same_count_spin.setFixedWidth(35)
@@ -652,7 +653,7 @@ class MainWindow(QMainWindow):
 
         h_roi_cfg.addWidget(QLabel("检测间隔(刷新倍数):"))
         self.roi_multiplier_spin = QSpinBox()
-        self.roi_multiplier_spin.setButtonSymbols(QAbstractSpinBox.NoButtons) # 改进二：清除上下箭头
+        self.roi_multiplier_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.roi_multiplier_spin.setRange(1, 1000)
         self.roi_multiplier_spin.setValue(self.config.get("roi_multiplier", 1))
         self.roi_multiplier_spin.setFixedWidth(35)
@@ -681,7 +682,7 @@ class MainWindow(QMainWindow):
         grp_roi.setLayout(g_roi)
         left_layout.addWidget(grp_roi)
 
-        # 7. 📋 运行日志面板（折叠后依然保留在主界面）
+        # 7. 📋 运行日志面板
         grp_log = QGroupBox("📋 运行日志")
         g_log = QVBoxLayout()
         self.log_box = QTextEdit()
@@ -750,7 +751,7 @@ class MainWindow(QMainWindow):
         self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
         
-        self.log("🚀 系统初始化完成 (V10.7 - 纯手动输入/实时回车/极简折叠版)")
+        self.log("🚀 系统初始化完成 (V10.8 - 增量智能防重报警版)")
         if self.config["url"]:
             self.load_page()
 
@@ -850,7 +851,8 @@ class MainWindow(QMainWindow):
     def clear_all_rois(self):
         self.roi_list.clear()
         self.box_latest_digits.clear()
-        self.box_ack_digits.clear()
+        self.box_ack_count.clear()
+        self.box_ack_matches.clear()
         self.box_is_alarming.clear()
         
         self.roi_overlay.rects = []
@@ -910,23 +912,23 @@ class MainWindow(QMainWindow):
 
             sec = self.calc_roi_check_interval()
             self.roi_remaining_seconds = sec
-            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒 (刷新{self.auto_interval.value()}s×{self.roi_multiplier_spin.value()}+5s)")
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
             self.roi_clock_timer.start(1000)
 
             self.roi_toggle_btn.setText("⏸️ 停止定时")
             self.roi_toggle_btn.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
             self.roi_status_label.setText("状态: 正在定时检测中...")
-            self.log(f"▶️ 定时检测开启，周期: {sec}秒 (刷新间隔{self.auto_interval.value()}s × {self.roi_multiplier_spin.value()} + 5s延时)")
+            self.log(f"▶️ 定时检测开启，周期: {sec}秒")
             self.perform_roi_ocr_check()
 
     def on_roi_clock_tick(self):
         if self.roi_remaining_seconds > 1:
             self.roi_remaining_seconds -= 1
-            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒 (刷新{self.auto_interval.value()}s×{self.roi_multiplier_spin.value()}+5s)")
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
         else:
             self.perform_roi_ocr_check()
             self.roi_remaining_seconds = self.calc_roi_check_interval()
-            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒 (刷新{self.auto_interval.value()}s×{self.roi_multiplier_spin.value()}+5s)")
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
 
     def segment_rows(self, img_bgr):
         h_img, w_img = img_bgr.shape[:2]
@@ -995,6 +997,7 @@ class MainWindow(QMainWindow):
 
         return rows
 
+    # 核心变动：增量匹配检测，消除报警后不再对已知旧数据重复报警
     def perform_roi_ocr_check(self):
         if not self.roi_list or not HAS_DDDDOCR or self.ocr is None:
             return
@@ -1050,32 +1053,42 @@ class MainWindow(QMainWindow):
                 val_str = " | ".join(box_digits) if box_digits else "无"
                 log_lines.append(f"【区域#{box_idx}】 (共{len(box_digits)}行数字): [{val_str}]")
 
-                rule_matched = False
+                has_new_unacked_alarm = False
+
                 if user_target_val:
-                    if box_digits.count(user_target_val) >= target_same_n:
-                        rule_matched = True
+                    # 模式 A: 设定了目标数值
+                    curr_count = box_digits.count(user_target_val)
+                    ack_count = self.box_ack_count.get(box_idx, 0)
+
+                    # 只有当达到阈值，且数量【多于已消报的数量】时，才判定为新报警
+                    if curr_count >= target_same_n and curr_count > ack_count:
+                        has_new_unacked_alarm = True
                 else:
+                    # 模式 B: 未指定目标数值，连续相同行数
+                    current_matches = set()
                     for i in range(len(box_digits) - target_same_n + 1):
-                        sub_group = box_digits[i : i + target_same_n]
+                        sub_group = tuple(box_digits[i : i + target_same_n])
                         if sub_group and all(x == sub_group[0] for x in sub_group):
-                            rule_matched = True
-                            break
+                            # 将 (起始行索引, 数值元组) 记录为唯一的报警特征
+                            current_matches.add((i, sub_group))
 
-                ack_digits = self.box_ack_digits.get(box_idx, None)
+                    ack_matches = self.box_ack_matches.get(box_idx, set())
+                    # 排除掉已经点过消除报警的特征
+                    new_matches = current_matches - ack_matches
 
-                if rule_matched:
-                    if box_digits != ack_digits:
-                        self.box_is_alarming[box_idx] = True
-                else:
-                    self.box_is_alarming[box_idx] = False
-                    self.box_ack_digits[box_idx] = None
+                    if len(new_matches) > 0:
+                        has_new_unacked_alarm = True
+
+                # 如果当前有之前未点消除的新报警，保持报警状态；否则不报警
+                if has_new_unacked_alarm:
+                    self.box_is_alarming[box_idx] = True
 
             self.log(f"🎯 监控检测结果:\n" + "\n".join(log_lines))
             self.roi_overlay.set_alarm_states(self.box_is_alarming)
 
             alarming_boxes = [idx for idx, is_al in self.box_is_alarming.items() if is_al]
             if alarming_boxes:
-                msg = f"🚨 区域 {alarming_boxes} 触发报警！"
+                msg = f"🚨 区域 {alarming_boxes} 触发增量新报警！"
                 self.roi_status_label.setText(f"状态: {msg}")
                 self.status_label.setText(msg)
                 
@@ -1090,26 +1103,40 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"❌ OCR 运行异常: {e}")
 
+    # 点击消除单个选框的报警（增量记录已消除内容）
     def clear_alarm_for_box(self, box_idx):
         self.box_is_alarming[box_idx] = False
-        self.box_ack_digits[box_idx] = list(self.box_latest_digits.get(box_idx, []))
-        
-        self.log(f"🔕 已消除【区域 #{box_idx}】的报警")
+
+        user_target_val = self.target_value_input.text().strip()
+        box_digits = self.box_latest_digits.get(box_idx, [])
+
+        if user_target_val:
+            # 记录当前已消报的数值出现总次数
+            self.box_ack_count[box_idx] = box_digits.count(user_target_val)
+        else:
+            # 记录当前已消报的所有连续行特征组
+            target_same_n = self.target_same_count_spin.value()
+            current_matches = set()
+            for i in range(len(box_digits) - target_same_n + 1):
+                sub_group = tuple(box_digits[i : i + target_same_n])
+                if sub_group and all(x == sub_group[0] for x in sub_group):
+                    current_matches.add((i, sub_group))
+
+            if box_idx not in self.box_ack_matches:
+                self.box_ack_matches[box_idx] = set()
+            self.box_ack_matches[box_idx].update(current_matches)
+
+        self.log(f"🔕 已消除【区域 #{box_idx}】的报警，表格追加新行时不再重复提示旧数据")
         self.roi_overlay.set_alarm_states(self.box_is_alarming)
-        
+
         if not any(self.box_is_alarming.values()):
             self.stop_alarm_audio()
             self.roi_status_label.setText("状态: 报警已消除，监控中...")
 
+    # 点击消除所有选框的报警
     def clear_all_alarms(self):
-        for box_idx in list(self.box_is_alarming.keys()):
-            self.box_is_alarming[box_idx] = False
-            self.box_ack_digits[box_idx] = list(self.box_latest_digits.get(box_idx, []))
-
-        self.roi_overlay.set_alarm_states(self.box_is_alarming)
-        self.stop_alarm_audio()
-        self.roi_status_label.setText("状态: 已消除所有报警")
-        self.log("🔕 已消除所有区域的报警")
+        for box_idx in range(1, len(self.roi_list) + 1):
+            self.clear_alarm_for_box(box_idx)
 
     def stop_alarm_audio(self):
         if self.alarm_loop_timer.isActive():
@@ -1143,7 +1170,6 @@ class MainWindow(QMainWindow):
             else:
                 self.sound_combo.setCurrentIndex(0)
 
-    # 改进一：粘贴完成后直接按下回车 (无需延时提交)
     def paste_credentials(self):
         account = self.account_input.text().strip()
         password = self.password_input.text().strip()
@@ -1283,7 +1309,6 @@ INJECT_SCRIPT = r"""
         return true;
     }
 
-    // 触发回车键（不强制调用 submit，便于后续填验证码）
     function triggerEnter(target) {
         if (!target) return;
         ['keydown', 'keypress', 'keyup'].forEach(function(eventType) {
@@ -1331,7 +1356,6 @@ INJECT_SCRIPT = r"""
             }
         }
 
-        // 填充完毕后直接触发回车键
         triggerEnter(activeTarget || document.activeElement);
         return true;
     }
@@ -1348,14 +1372,12 @@ if __name__ == "__main__":
     app.setQuitOnLastWindowClosed(True) 
     app.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     
-    # CSS 全局消除 SpinBox 上下箭头按钮
     app.setStyleSheet("""
         QMainWindow, QWidget, QDialog { background-color: #1a1a24; color: #cdd6f4; }
         QGroupBox { font-weight: bold; border: 1px solid #3b3b4f; border-radius: 6px; margin-top: 8px; padding-top: 8px; }
         QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #38bdf8; }
         QLineEdit, QSpinBox, QComboBox { background-color: #262636; color: #ffffff; border: 1px solid #3b3b4f; border-radius: 4px; padding: 3px; }
         
-        /* 强制隐藏 SpinBox 微调箭头按钮 */
         QSpinBox::up-button, QSpinBox::down-button { width: 0px; height: 0px; border: none; }
         QSpinBox::up-arrow, QSpinBox::down-arrow { image: none; }
 
