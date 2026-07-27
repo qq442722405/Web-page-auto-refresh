@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-网页自动登录与刷新工具（V9.2 日志与缩放增强版）
+网页自动登录与刷新工具（V9.3 UI与监控增强版）
 包含功能：
- 1. 填入框宽度拉长一倍，新增网页显示比例（缩放）调节
- 2. 底部增加实时运行日志控制台，打印 ddddocr 识别数值与系统状态
- 3. ddddocr 神经网络 + det 智能切块 + 内存流 (QBuffer/OpenCV) 零磁盘读写
- 4. 交互式 ROI 透明遮罩框选监控区域
- 5. 基于“状态变化”的报警逻辑（连续 3 行数字相同即触发变化报警）
- 6. F11 隐藏控制栏完全全屏与定时刷新、一键贴码、二维码截图
+ 1. 网页加载按钮贴在地址栏右侧图标表示
+ 2. 账号密码并排排列，一键粘贴与保存配置并排显示
+ 3. ROI 监控框新增实时“识别数值”显示，直观确认识别结果
+ 4. 移除手动刷新按钮，保留定时自动刷新
+ 5. ddddocr 神经网络 + det 智能切块 + 内存流 (QBuffer/OpenCV) 零磁盘读写
+ 6. F11 隐藏控制栏完全全屏、二维码截图、运行日志
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -216,7 +216,7 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页自动登录与刷新工具 V9.2 (日志与缩放增强版)")
+        self.setWindowTitle("网页自动登录与刷新工具 V9.3 (UI与监控增强版)")
         self.resize(1320, 880)
         self.config = load_config()
         
@@ -245,15 +245,25 @@ class MainWindow(QMainWindow):
 
         # ---------- 左侧控制面板 ----------
         self.left_panel = QWidget()
-        self.left_panel.setFixedWidth(310) # 适当加宽确保美观
+        self.left_panel.setFixedWidth(310)
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
 
-        # 1. 页面地址与显示比例
+        # 1. 页面地址与显示比例 (一. 按钮放在地址栏右侧图标表示)
         grp_url = QGroupBox("页面地址与显示比例")
         g_url = QVBoxLayout()
+        
+        h_url = QHBoxLayout()
         self.url_input = QLineEdit(self.config["url"])
-        g_url.addWidget(self.url_input)
+        self.url_input.setPlaceholderText("请输入网页地址...")
+        self.url_input.returnPressed.connect(self.load_page)
+        self.load_btn = QPushButton("🌐")
+        self.load_btn.setToolTip("加载页面")
+        self.load_btn.setFixedWidth(36)
+        self.load_btn.clicked.connect(self.load_page)
+        h_url.addWidget(self.url_input)
+        h_url.addWidget(self.load_btn)
+        g_url.addLayout(h_url)
 
         h_zoom = QHBoxLayout()
         h_zoom.addWidget(QLabel("网页缩放:"))
@@ -262,40 +272,42 @@ class MainWindow(QMainWindow):
         self.zoom_spin.setSingleStep(10)
         self.zoom_spin.setSuffix("%")
         self.zoom_spin.setValue(int(self.config.get("zoom_level", 1.0) * 100))
-        self.zoom_spin.setFixedWidth(90) # 拉长一倍 (90px)
+        self.zoom_spin.setFixedWidth(90)
         self.zoom_spin.valueChanged.connect(self.on_zoom_changed)
         h_zoom.addWidget(self.zoom_spin)
         h_zoom.addStretch()
         g_url.addLayout(h_zoom)
 
-        self.load_btn = QPushButton("加载页面")
-        self.load_btn.clicked.connect(self.load_page)
-        g_url.addWidget(self.load_btn)
         grp_url.setLayout(g_url)
         left_layout.addWidget(grp_url)
 
-        # 2. 账号密码凭证
+        # 2. 账号密码凭证 (二. 删除密码字样，输入框合并并列，左粘贴右保存)
         grp_auth = QGroupBox("账号密码")
         g_auth = QVBoxLayout()
-        g_auth.addWidget(QLabel("账号:"))
+        
+        h_creds = QHBoxLayout()
         self.account_input = QLineEdit(self.config["account"])
-        g_auth.addWidget(self.account_input)
-        g_auth.addWidget(QLabel("密码:"))
+        self.account_input.setPlaceholderText("账号")
         self.password_input = QLineEdit(self.config["password"])
-        g_auth.addWidget(self.password_input)
+        self.password_input.setPlaceholderText("密码")
+        h_creds.addWidget(self.account_input)
+        h_creds.addWidget(self.password_input)
+        g_auth.addLayout(h_creds)
 
-        self.paste_btn = QPushButton("📋 一键粘贴账号密码")
+        h_btns = QHBoxLayout()
+        self.paste_btn = QPushButton("📋 一键粘贴")
         self.paste_btn.clicked.connect(self.paste_credentials)
-        g_auth.addWidget(self.paste_btn)
-
-        self.save_btn = QPushButton("💾 保存全部设置")
+        self.save_btn = QPushButton("💾 保存配置")
         self.save_btn.clicked.connect(self.save_settings)
         self.save_btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white; height: 26px;")
-        g_auth.addWidget(self.save_btn)
+        h_btns.addWidget(self.paste_btn)
+        h_btns.addWidget(self.save_btn)
+        g_auth.addLayout(h_btns)
+
         grp_auth.setLayout(g_auth)
         left_layout.addWidget(grp_auth)
 
-        # 3. 智能 ROI 框选监控 (ddddocr)
+        # 3. 智能 ROI 框选监控 (三. 增加实时“识别数值”显示)
         grp_roi = QGroupBox("🎯 ROI 表格数字监控 (ddddocr)")
         g_roi = QVBoxLayout()
 
@@ -315,7 +327,7 @@ class MainWindow(QMainWindow):
         self.roi_interval_spin = QSpinBox()
         self.roi_interval_spin.setRange(1, 60)
         self.roi_interval_spin.setValue(self.config.get("roi_interval_sec", 2))
-        self.roi_interval_spin.setFixedWidth(90) # 拉长一倍 (90px)
+        self.roi_interval_spin.setFixedWidth(90)
         h_roi_cfg.addWidget(self.roi_interval_spin)
         h_roi_cfg.addWidget(QLabel("秒"))
         h_roi_cfg.addStretch()
@@ -325,6 +337,12 @@ class MainWindow(QMainWindow):
         self.roi_info_label.setStyleSheet("color: #38bdf8; font-size: 11px;")
         g_roi.addWidget(self.roi_info_label)
 
+        # 新增：直接显示识别到的结果
+        self.roi_result_label = QLabel("识别数值: [未识别]")
+        self.roi_result_label.setStyleSheet("color: #a7f3d0; font-size: 11px; font-weight: bold;")
+        self.roi_result_label.setWordWrap(True)
+        g_roi.addWidget(self.roi_result_label)
+
         self.roi_status_label = QLabel("状态: 未开启 (连续3行相同即报警)")
         self.roi_status_label.setStyleSheet("color: #fbbf24; font-size: 11px;")
         self.roi_status_label.setWordWrap(True)
@@ -333,21 +351,16 @@ class MainWindow(QMainWindow):
         grp_roi.setLayout(g_roi)
         left_layout.addWidget(grp_roi)
 
-        # 4. 刷新控制
+        # 4. 刷新控制 (四. 删除手动刷新按钮)
         grp_refresh = QGroupBox("刷新控制")
         g_refresh = QVBoxLayout()
-        h_refresh = QHBoxLayout()
-        self.refresh_btn = QPushButton("🔄 手动刷新")
-        self.refresh_btn.clicked.connect(self.refresh_page)
-        h_refresh.addWidget(self.refresh_btn)
-        g_refresh.addLayout(h_refresh)
 
         h_auto = QHBoxLayout()
         h_auto.addWidget(QLabel("刷新时间间隔:"))
         self.auto_interval = QSpinBox()
         self.auto_interval.setRange(1, 3600)
         self.auto_interval.setValue(self.config.get("auto_interval", 60))
-        self.auto_interval.setFixedWidth(90) # 拉长一倍 (90px)
+        self.auto_interval.setFixedWidth(90)
         self.auto_interval.valueChanged.connect(self.update_auto_interval)
         h_auto.addWidget(self.auto_interval)
         
@@ -391,7 +404,7 @@ class MainWindow(QMainWindow):
         self.rem_count = QSpinBox()
         self.rem_count.setRange(1, 99)
         self.rem_count.setValue(self.config.get("reminder_sound_count", 3))
-        self.rem_count.setFixedWidth(90) # 拉长一倍 (90px)
+        self.rem_count.setFixedWidth(90)
         h_count_loop.addWidget(self.rem_count)
         h_count_loop.addStretch()
         g_reminder.addLayout(h_count_loop)
@@ -414,12 +427,12 @@ class MainWindow(QMainWindow):
         grp_snap.setLayout(g_snap)
         left_layout.addWidget(grp_snap)
 
-        # 7. 最下方运行日志输出面板
-        grp_log = QGroupBox("📋 运行日志与识别数值")
+        # 7. 底部运行日志面板
+        grp_log = QGroupBox("📋 运行日志")
         g_log = QVBoxLayout()
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMaximumHeight(150)
+        self.log_box.setMaximumHeight(130)
         self.log_box.setStyleSheet("font-size: 11px; background-color: #11111b; color: #a6adc8; border: 1px solid #313244;")
         g_log.addWidget(self.log_box)
         grp_log.setLayout(g_log)
@@ -492,7 +505,7 @@ class MainWindow(QMainWindow):
             self.load_page()
 
     def log(self, text):
-        """将输出打印到最下方的日志窗口"""
+        """将输出打印到底部的日志窗口"""
         time_str = QDateTime.currentDateTime().toString("hh:mm:ss")
         self.log_box.append(f"[{time_str}] {text}")
         self.log_box.moveCursor(QTextCursor.End)
@@ -664,10 +677,13 @@ class MainWindow(QMainWindow):
                 d = "".join(filter(str.isdigit, line))
                 if d: row_digit_list.append(d)
 
-        # 打印数值到底部日志框
+        # 实时更新“识别数值”界面标签，并写入控制台日志
         if row_digit_list:
+            res_text = " | ".join(row_digit_list)
+            self.roi_result_label.setText(f"识别数值: [{res_text}]")
             self.log(f"🎯 识别到行数值: {row_digit_list}")
         else:
+            self.roi_result_label.setText("识别数值: [未识别到数字]")
             self.log("🔍 监控区域内未识别到有效数字")
 
         # 4. 判断逻辑：“有3行靠在一起的相同”
@@ -690,18 +706,18 @@ class MainWindow(QMainWindow):
 
         if has_3_consecutive_same:
             if current_signature != self.last_alarm_signature:
-                msg = f"🚨 发现 3 行相同数字 [{matched_value}] (状态更新报警！)"
+                msg = f"🚨 发现 3 行相同数字 [{matched_value}] (触发报警！)"
                 self.roi_status_label.setText(f"状态: {msg}")
                 self.status_label.setText(msg)
                 self.log(f"⚠️ 【触发报警】连续3行数值均为 [{matched_value}]！")
                 self.trigger_alarm_sound()
                 self.last_alarm_signature = current_signature
             else:
-                self.roi_status_label.setText(f"状态: 连续3行相同 [{matched_value}] (已报警，等待新变化...)")
+                self.roi_status_label.setText(f"状态: 连续3行相同 [{matched_value}] (已报警)")
         else:
             self.last_alarm_signature = None
-            display_str = " -> ".join(row_digit_list[-3:]) if row_digit_list else "无有效数字"
-            self.roi_status_label.setText(f"状态: 监控中 | 最新行数据: [{display_str}]")
+            display_str = " -> ".join(row_digit_list[-3:]) if row_digit_list else "无"
+            self.roi_status_label.setText(f"状态: 监控中 | 最近数据: [{display_str}]")
 
     # ---------- 音频控制与辅助函数 ----------
     def on_sound_selection_changed(self, index):
@@ -711,7 +727,7 @@ class MainWindow(QMainWindow):
             )
             if file_path:
                 self.custom_sound_path = file_path
-                self.log(f"🎵 已设定自定义铃声路径")
+                self.log("🎵 已设定自定义铃声路径")
             else:
                 self.sound_combo.setCurrentIndex(0)
 
@@ -773,7 +789,7 @@ class MainWindow(QMainWindow):
             qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={urllib.parse.quote(self.current_file_url)}"
             self.reply = self.nam.get(QNetworkRequest(QUrl(qr_api)))
             self.reply.finished.connect(self.on_qr_downloaded)
-            self.log(f"📸 截图已保存并生成二维码，本地链接: {self.current_file_url}")
+            self.log(f"📸 截图已保存，生成链接: {self.current_file_url}")
 
     def on_qr_downloaded(self):
         if self.reply.error() == QNetworkReply.NoError:
@@ -798,7 +814,7 @@ class MainWindow(QMainWindow):
         
         save_config(self.config)
         self.log("💾 配置文件保存成功！")
-        self.status_label.setText("所有设置已保存固化")
+        self.status_label.setText("设置已保存固化")
 
     def refresh_page(self):
         self.log("🔄 触发网页刷新...")
@@ -814,7 +830,7 @@ class MainWindow(QMainWindow):
     def start_auto_timer(self):
         self.remaining_seconds = self.auto_interval.value()
         self.refresh_clock.start(1000)
-        self.log(f"⏱️ 自动刷新开启，时间间隔: {self.remaining_seconds}秒")
+        self.log(f"⏱️ 自动刷新开启，间隔: {self.remaining_seconds}秒")
 
     def stop_auto_timer(self):
         self.refresh_clock.stop()
