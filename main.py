@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V10.0 - 方式一物理抓图与多行表格识别集成版)
-升级亮点：
- 1. 【页面设置】与【账号密码】组合联动作业区，支持通过上下箭头 (▲/▼) 统一收起与展开，收起时日志框自动拉伸。
- 2. 集成“方式一”系统物理像素级抓图 (QGuiApplication.primaryScreen().grabWindow)，解决网页截屏空白/发黑问题。
- 3. 内置 OpenCV 水平投影多行表格自动分割算法 + 3倍双三次插值放大 (INTER_CUBIC)，对多行数字、小字号表格实现高精度识别。
- 4. 保留所有原本配置保存、一键粘贴、自动刷新、音效提醒、局域网截图与扫码功能。
+网页刷新数字监控 (V10.1 - 修复内存对齐字节对齐与方式一物理抓图集成版)
+更新日志：
+ 1. 修复 QImage 内存4字节对齐填充导致的 numpy reshape 崩溃问题（支持任意奇数/偶数高宽的 ROI 框选）。
+ 2. 【页面设置】与【账号密码】组合联动作业区，支持通过上下箭头 (▲/▼) 统一收起与展开，收起时日志框自动拉伸。
+ 3. 集成系统物理像素级抓图 (QGuiApplication.primaryScreen().grabWindow)，解决网页截屏空白/发黑问题。
+ 4. 内置 OpenCV 水平投影多行表格自动分割算法 + 3倍双三次插值放大 (INTER_CUBIC)，对多行数字、小字号表格实现高精度识别。
+ 5. 保留所有原本配置保存、一键粘贴、自动刷新、音效提醒、局域网截图与扫码功能。
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -265,7 +266,7 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V10.0 - 方式一物理抓图集成版)")
+        self.setWindowTitle("网页刷新数字监控 (V10.1 - 修复内存对齐字节对齐版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -561,7 +562,7 @@ class MainWindow(QMainWindow):
         self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
         
-        self.log("🚀 系统初始化完成 (已融合方式一物理抓图与多行识别算法)")
+        self.log("🚀 系统初始化完成 (已修复 QImage 内存对齐并融合方式一物理抓图算法)")
         if self.config["url"]:
             self.load_page()
 
@@ -688,7 +689,6 @@ class MainWindow(QMainWindow):
             self.log(f"▶️ 定时检测开启，间隔: {sec}秒")
             self.perform_roi_ocr_check()
 
-    # ==================== 方式一核心抓图 + OpenCV 行分割算法 ====================
     def segment_rows(self, img_bgr):
         """ OpenCV 水平投影多行表格/文字切割算法 """
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -750,9 +750,14 @@ class MainWindow(QMainWindow):
                 self.roi_result_label.setText("识别数值: [抓图失败，物理像素为空]")
                 return
 
-            # 2. 转为 OpenCV 格式
+            # 2. 转为 OpenCV 格式 (已修复 QImage 内存4字节补齐 Padding 崩溃 BUG)
             qimg = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
-            arr = np.array(qimg.bits()).reshape(qimg.height(), qimg.width(), 3)
+            h, w = qimg.height(), qimg.width()
+            bpl = qimg.bytesPerLine() # 获取包含对齐填充的单行实际字节数
+
+            # 先 reshape 为 (h, bpl)，剔除行末补齐，再 reshape 为 (h, w, 3)
+            arr = np.array(qimg.bits()).reshape((h, bpl))
+            arr = arr[:, :w * 3].reshape((h, w, 3))
             img_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
             # 3. 自动多行表格切割分析
