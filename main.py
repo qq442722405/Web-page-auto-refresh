@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-网页自动登录与刷新工具（V9.1 修正版）
+网页自动登录与刷新工具（V9.2 日志与缩放增强版）
 包含功能：
- 1. 修复 PySide6 导入顺序与 Qt.WindowStaysOnTopHint 窗口属性兼容
- 2. ddddocr 神经网络 + det 智能切块 + 内存流 (QBuffer/OpenCV) 零磁盘读写
- 3. 交互式 ROI 透明遮罩框选监控区域
- 4. 基于“状态变化”的报警逻辑（连续 3 行数字相同即触发变化报警，不盲目重复提醒）
- 5. F11 隐藏控制栏完全全屏与定时刷新、一键贴码、二维码截图
+ 1. 填入框宽度拉长一倍，新增网页显示比例（缩放）调节
+ 2. 底部增加实时运行日志控制台，打印 ddddocr 识别数值与系统状态
+ 3. ddddocr 神经网络 + det 智能切块 + 内存流 (QBuffer/OpenCV) 零磁盘读写
+ 4. 交互式 ROI 透明遮罩框选监控区域
+ 5. 基于“状态变化”的报警逻辑（连续 3 行数字相同即触发变化报警）
+ 6. F11 隐藏控制栏完全全屏与定时刷新、一键贴码、二维码截图
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -28,15 +29,15 @@ try:
 except ImportError:
     HAS_DDDDOCR = False
 
-# ==================== 2. PySide6 核心组件导入 (必须在定义 GUI 类前) ====================
+# ==================== 2. PySide6 核心组件导入 ====================
 from PySide6.QtCore import QUrl, Qt, QTimer, QDateTime, QRect, QPoint, QBuffer, QIODevice, Signal
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
     QPushButton, QLineEdit, QLabel, QSpinBox, QCheckBox,
     QSystemTrayIcon, QMenu, QGroupBox, QSizePolicy, QFileDialog, QDialog,
-    QComboBox
+    QComboBox, QTextEdit
 )
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor, QTextCursor
 from PySide6.QtNetwork import (
     QNetworkAccessManager, QNetworkRequest, QNetworkReply, 
     QNetworkInterface, QAbstractSocket
@@ -102,7 +103,6 @@ class ROIOverlay(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 修正：采用 PySide6 标准属性 WindowStaysOnTopHint
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
@@ -216,8 +216,8 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页自动登录与刷新工具 V9.1 (ddddocr 智能识别版)")
-        self.resize(1280, 850)
+        self.setWindowTitle("网页自动登录与刷新工具 V9.2 (日志与缩放增强版)")
+        self.resize(1320, 880)
         self.config = load_config()
         
         self.nam = QNetworkAccessManager(self)
@@ -233,7 +233,7 @@ class MainWindow(QMainWindow):
         # ROI 监控变量
         roi_cfg = self.config.get("roi_rect", [50, 50, 300, 200])
         self.roi_rect = QRect(roi_cfg[0], roi_cfg[1], roi_cfg[2], roi_cfg[3])
-        self.last_alarm_signature = None  # 状态标记（用于变化检测）
+        self.last_alarm_signature = None
 
         self.start_local_server()
 
@@ -245,15 +245,29 @@ class MainWindow(QMainWindow):
 
         # ---------- 左侧控制面板 ----------
         self.left_panel = QWidget()
-        self.left_panel.setFixedWidth(290)
+        self.left_panel.setFixedWidth(310) # 适当加宽确保美观
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
 
-        # 1. URL 页面地址
-        grp_url = QGroupBox("页面地址")
+        # 1. 页面地址与显示比例
+        grp_url = QGroupBox("页面地址与显示比例")
         g_url = QVBoxLayout()
         self.url_input = QLineEdit(self.config["url"])
         g_url.addWidget(self.url_input)
+
+        h_zoom = QHBoxLayout()
+        h_zoom.addWidget(QLabel("网页缩放:"))
+        self.zoom_spin = QSpinBox()
+        self.zoom_spin.setRange(25, 300)
+        self.zoom_spin.setSingleStep(10)
+        self.zoom_spin.setSuffix("%")
+        self.zoom_spin.setValue(int(self.config.get("zoom_level", 1.0) * 100))
+        self.zoom_spin.setFixedWidth(90) # 拉长一倍 (90px)
+        self.zoom_spin.valueChanged.connect(self.on_zoom_changed)
+        h_zoom.addWidget(self.zoom_spin)
+        h_zoom.addStretch()
+        g_url.addLayout(h_zoom)
+
         self.load_btn = QPushButton("加载页面")
         self.load_btn.clicked.connect(self.load_page)
         g_url.addWidget(self.load_btn)
@@ -281,7 +295,7 @@ class MainWindow(QMainWindow):
         grp_auth.setLayout(g_auth)
         left_layout.addWidget(grp_auth)
 
-        # 3. 智能 ROI 框选监控 (ddddocr + 切块 + 变化报警)
+        # 3. 智能 ROI 框选监控 (ddddocr)
         grp_roi = QGroupBox("🎯 ROI 表格数字监控 (ddddocr)")
         g_roi = QVBoxLayout()
 
@@ -301,7 +315,7 @@ class MainWindow(QMainWindow):
         self.roi_interval_spin = QSpinBox()
         self.roi_interval_spin.setRange(1, 60)
         self.roi_interval_spin.setValue(self.config.get("roi_interval_sec", 2))
-        self.roi_interval_spin.setFixedWidth(45)
+        self.roi_interval_spin.setFixedWidth(90) # 拉长一倍 (90px)
         h_roi_cfg.addWidget(self.roi_interval_spin)
         h_roi_cfg.addWidget(QLabel("秒"))
         h_roi_cfg.addStretch()
@@ -329,11 +343,11 @@ class MainWindow(QMainWindow):
         g_refresh.addLayout(h_refresh)
 
         h_auto = QHBoxLayout()
-        h_auto.addWidget(QLabel("间隔(秒):"))
+        h_auto.addWidget(QLabel("刷新时间间隔:"))
         self.auto_interval = QSpinBox()
         self.auto_interval.setRange(1, 3600)
         self.auto_interval.setValue(self.config.get("auto_interval", 60))
-        self.auto_interval.setFixedWidth(50)
+        self.auto_interval.setFixedWidth(90) # 拉长一倍 (90px)
         self.auto_interval.valueChanged.connect(self.update_auto_interval)
         h_auto.addWidget(self.auto_interval)
         
@@ -377,7 +391,7 @@ class MainWindow(QMainWindow):
         self.rem_count = QSpinBox()
         self.rem_count.setRange(1, 99)
         self.rem_count.setValue(self.config.get("reminder_sound_count", 3))
-        self.rem_count.setFixedWidth(40)
+        self.rem_count.setFixedWidth(90) # 拉长一倍 (90px)
         h_count_loop.addWidget(self.rem_count)
         h_count_loop.addStretch()
         g_reminder.addLayout(h_count_loop)
@@ -400,10 +414,20 @@ class MainWindow(QMainWindow):
         grp_snap.setLayout(g_snap)
         left_layout.addWidget(grp_snap)
 
+        # 7. 最下方运行日志输出面板
+        grp_log = QGroupBox("📋 运行日志与识别数值")
+        g_log = QVBoxLayout()
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setMaximumHeight(150)
+        self.log_box.setStyleSheet("font-size: 11px; background-color: #11111b; color: #a6adc8; border: 1px solid #313244;")
+        g_log.addWidget(self.log_box)
+        grp_log.setLayout(g_log)
+        left_layout.addWidget(grp_log)
+
         # 状态栏
         self.status_label = QLabel("系统就绪")
         left_layout.addWidget(self.status_label)
-        left_layout.addStretch()
 
         # ---------- 中间折叠栏 ----------
         self.toggle_bar = QWidget()
@@ -462,8 +486,16 @@ class MainWindow(QMainWindow):
         if self.config.get("panel_collapsed", False):
             self.left_panel.setVisible(False)
             self.toggle_btn.setText(">")
+        
+        self.log("🚀 系统初始化完成，软件已就绪")
         if self.config["url"]:
             self.load_page()
+
+    def log(self, text):
+        """将输出打印到最下方的日志窗口"""
+        time_str = QDateTime.currentDateTime().toString("hh:mm:ss")
+        self.log_box.append(f"[{time_str}] {text}")
+        self.log_box.moveCursor(QTextCursor.End)
 
     def init_ddddocr_engines(self):
         """初始化 ddddocr (神经网络分类与智能切块引擎)"""
@@ -508,19 +540,27 @@ class MainWindow(QMainWindow):
         self.left_panel.setVisible(not is_visible)
         self.toggle_btn.setText(">" if is_visible else "<")
 
+    def on_zoom_changed(self, value):
+        factor = value / 100.0
+        self.webview.setZoomFactor(factor)
+        self.config["zoom_level"] = factor
+
     def load_page(self):
         url = self.url_input.text().strip()
         if not url: return
         if not url.startswith("http://") and not url.startswith("https://"):
             url = "https://" + url
+        self.log(f"🌐 正在加载页面: {url}")
         self.webview.load(QUrl(url))
 
     def on_load_finished(self, ok):
         if ok:
+            self.log("✅ 页面加载完毕")
             self.webview.page().runJavaScript(INJECT_SCRIPT)
             QTimer.singleShot(1500, self.paste_credentials)
         else:
-            self.status_label.setText("页面加载失败，请检查网络")
+            self.log("❌ 页面加载失败，请检查网络")
+            self.status_label.setText("页面加载失败")
 
     # ---------- ROI 框选与 ddddocr 识别核心 ----------
     def start_roi_selection(self):
@@ -531,6 +571,7 @@ class MainWindow(QMainWindow):
     def on_roi_selected(self, rect):
         self.roi_rect = rect
         self.roi_info_label.setText(f"坐标: {rect.x()},{rect.y()} [{rect.width()}x{rect.height()}]")
+        self.log(f"📐 重新设置 ROI 监控区域: [{rect.x()},{rect.y()} - {rect.width()}x{rect.height()}]")
         self.status_label.setText("✅ ROI 框选区域设置成功！")
         self.perform_roi_ocr_check()
 
@@ -540,22 +581,25 @@ class MainWindow(QMainWindow):
             self.roi_toggle_btn.setText("▶️ 开启监控")
             self.roi_toggle_btn.setStyleSheet("background-color: #10b981; color: white; font-weight: bold;")
             self.roi_status_label.setText("状态: 监控已停止")
+            self.log("⏹️ ROI 数字监控已停止")
         else:
             if not HAS_DDDDOCR or self.std_ocr is None:
                 self.roi_status_label.setText("❌ 缺少 ddddocr 依赖！无法运行")
+                self.log("❌ 缺失 ddddocr 模块，开启失败")
                 return
             sec = self.roi_interval_spin.value()
             self.roi_monitor_timer.start(sec * 1000)
             self.roi_toggle_btn.setText("⏸️ 停止监控")
             self.roi_toggle_btn.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
             self.roi_status_label.setText("状态: 正在监控中...")
+            self.log(f"▶️ ROI 数字监控开启，间隔: {sec}秒")
             self.perform_roi_ocr_check()
 
     def perform_roi_ocr_check(self):
         if self.roi_rect.width() <= 0 or self.roi_rect.height() <= 0:
             return
 
-        # 1. 抓取 ROI 图像并写入内存流 QBuffer (内存处理，零磁盘 I/O)
+        # 1. 抓取 ROI 图像并写入内存流 QBuffer
         pixmap = self.webview.grab(self.roi_rect)
         if pixmap.isNull():
             return
@@ -572,15 +616,14 @@ class MainWindow(QMainWindow):
         if img is None:
             return
 
-        # 3. ddddocr Detection 智能文本区域切块
+        # 3. ddddocr Detection 智能文本区域切块识别
         row_digit_list = []
         try:
             bboxes = self.det_ocr.detection(img_bytes)
-        except Exception as e:
+        except Exception:
             bboxes = []
 
         if bboxes:
-            # 依 Y 轴升序排序并归类同行切块
             bboxes_sorted = sorted(bboxes, key=lambda b: (b[1], b[0]))
             grouped_rows = []
             current_row = []
@@ -588,7 +631,7 @@ class MainWindow(QMainWindow):
 
             for box in bboxes_sorted:
                 x1, y1, x2, y2 = box
-                if last_y is None or abs(y1 - last_y) < 12: # Y 轴 12px 内判定为同一表格行
+                if last_y is None or abs(y1 - last_y) < 12:
                     current_row.append(box)
                 else:
                     grouped_rows.append(current_row)
@@ -597,7 +640,6 @@ class MainWindow(QMainWindow):
             if current_row:
                 grouped_rows.append(current_row)
 
-            # 对行内切片进行排序与神经网络分类识别
             for row in grouped_rows:
                 row_sorted = sorted(row, key=lambda b: b[0])
                 row_text = ""
@@ -622,7 +664,11 @@ class MainWindow(QMainWindow):
                 d = "".join(filter(str.isdigit, line))
                 if d: row_digit_list.append(d)
 
-        print(f"[{QDateTime.currentDateTime().toString('hh:mm:ss')}] 🎯 ROI 识别表格行数据: {row_digit_list}")
+        # 打印数值到底部日志框
+        if row_digit_list:
+            self.log(f"🎯 识别到行数值: {row_digit_list}")
+        else:
+            self.log("🔍 监控区域内未识别到有效数字")
 
         # 4. 判断逻辑：“有3行靠在一起的相同”
         matched_value = None
@@ -639,7 +685,7 @@ class MainWindow(QMainWindow):
                 match_start_idx = i
                 break
 
-        # 5. 基于“变化”的报警逻辑（仅在产生新状态时报警一次）
+        # 5. 基于“变化”的报警逻辑
         current_signature = f"{match_start_idx}:{matched_value}" if has_3_consecutive_same else None
 
         if has_3_consecutive_same:
@@ -647,7 +693,7 @@ class MainWindow(QMainWindow):
                 msg = f"🚨 发现 3 行相同数字 [{matched_value}] (状态更新报警！)"
                 self.roi_status_label.setText(f"状态: {msg}")
                 self.status_label.setText(msg)
-                print(f"⚠️ 【报警触发】{msg}")
+                self.log(f"⚠️ 【触发报警】连续3行数值均为 [{matched_value}]！")
                 self.trigger_alarm_sound()
                 self.last_alarm_signature = current_signature
             else:
@@ -665,6 +711,7 @@ class MainWindow(QMainWindow):
             )
             if file_path:
                 self.custom_sound_path = file_path
+                self.log(f"🎵 已设定自定义铃声路径")
             else:
                 self.sound_combo.setCurrentIndex(0)
 
@@ -726,6 +773,7 @@ class MainWindow(QMainWindow):
             qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={urllib.parse.quote(self.current_file_url)}"
             self.reply = self.nam.get(QNetworkRequest(QUrl(qr_api)))
             self.reply.finished.connect(self.on_qr_downloaded)
+            self.log(f"📸 截图已保存并生成二维码，本地链接: {self.current_file_url}")
 
     def on_qr_downloaded(self):
         if self.reply.error() == QNetworkReply.NoError:
@@ -738,6 +786,7 @@ class MainWindow(QMainWindow):
         self.config["url"] = self.url_input.text().strip()
         self.config["account"] = self.account_input.text().strip()
         self.config["password"] = self.password_input.text().strip()
+        self.config["zoom_level"] = self.zoom_spin.value() / 100.0
         self.config["auto_refresh"] = self.auto_refresh_cb.isChecked()
         self.config["auto_interval"] = self.auto_interval.value()
         self.config["selected_ip"] = self.ip_combo.currentText() 
@@ -748,9 +797,11 @@ class MainWindow(QMainWindow):
         self.config["roi_interval_sec"] = self.roi_interval_spin.value()
         
         save_config(self.config)
+        self.log("💾 配置文件保存成功！")
         self.status_label.setText("所有设置已保存固化")
 
     def refresh_page(self):
+        self.log("🔄 触发网页刷新...")
         self.webview.reload()
 
     def on_auto_refresh_changed(self, state):
@@ -763,10 +814,12 @@ class MainWindow(QMainWindow):
     def start_auto_timer(self):
         self.remaining_seconds = self.auto_interval.value()
         self.refresh_clock.start(1000)
+        self.log(f"⏱️ 自动刷新开启，时间间隔: {self.remaining_seconds}秒")
 
     def stop_auto_timer(self):
         self.refresh_clock.stop()
         self.countdown_label.setText("")
+        self.log("⏱️ 自动刷新已停止")
 
     def on_refresh_clock_tick(self):
         if self.remaining_seconds > 1:
