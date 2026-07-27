@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V9.4)
-包含功能：
- 1. 缩放与刷新间隔并排显示，布局精致紧凑
- 2. 支持“手动触发识别”与定时自动检测
- 3. 增强 ddddocr 双重识别算法，显示原始识别字符串防误判
- 4. 底部日志框大幅扩容，实时打印系统状态与识别明细
- 5. F11 全屏、自动刷新、扫码截图、账号密码一键填充
+网页刷新数字监控 (V9.5)
+新增与优化：
+ 1. 支持自定义报警数值与触发连续行数
+ 2. 按钮更名为“手动检测”，并增加点击响应提示
+ 3. 完美兼容 1.ico 图标（软件窗口与托盘）
+ 4. 修复 ddddocr 模块丢失诊断与反馈
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
-# ==================== 1. 标准库与第三方基础库导入 ====================
 import sys
 import json
 import os
@@ -22,11 +20,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import numpy as np
 import cv2
 
+# ==================== 1. ddddocr 兼容性导入检查 ====================
+HAS_DDDDOCR = False
+DDDDOCR_ERR_MSG = ""
 try:
     import ddddocr
     HAS_DDDDOCR = True
-except ImportError:
+except Exception as e:
     HAS_DDDDOCR = False
+    DDDDOCR_ERR_MSG = str(e)
 
 # ==================== 2. PySide6 核心组件导入 ====================
 from PySide6.QtCore import QUrl, Qt, QTimer, QDateTime, QRect, QPoint, QBuffer, QIODevice, Signal
@@ -62,7 +64,9 @@ def load_config():
         "reminder_custom_path": "",
         "reminder_sound_count": 3,
         "roi_rect": [100, 100, 300, 200],
-        "roi_interval_sec": 2
+        "roi_interval_sec": 2,
+        "target_same_count": 3,
+        "target_value": ""
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -214,7 +218,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("网页刷新数字监控")
         self.resize(1340, 880)
         self.config = load_config()
-        
+
+        # 【三. 加载 1.ico 图标】
+        if os.path.exists("1.ico"):
+            self.setWindowIcon(QIcon("1.ico"))
+
         self.nam = QNetworkAccessManager(self)
         self.current_file_url = ""
         self.custom_sound_path = self.config.get("reminder_custom_path", "")
@@ -226,7 +234,7 @@ class MainWindow(QMainWindow):
         self.init_ddddocr_engines()
 
         # ROI 监控变量
-        roi_cfg = self.config.get("roi_rect", [50, 50, 300, 200])
+        roi_cfg = self.config.get("roi_rect", [100, 100, 300, 200])
         self.roi_rect = QRect(roi_cfg[0], roi_cfg[1], roi_cfg[2], roi_cfg[3])
         self.last_alarm_signature = None
 
@@ -244,7 +252,7 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
 
-        # 1. 页面设置（地址 + 缩放 + 刷新间隔）
+        # 1. 页面设置
         grp_url = QGroupBox("页面设置与刷新")
         g_url = QVBoxLayout()
         
@@ -260,9 +268,7 @@ class MainWindow(QMainWindow):
         h_url.addWidget(self.load_btn)
         g_url.addLayout(h_url)
 
-        # 【一. 缩放与刷新间隔并排放置】
         h_opts = QHBoxLayout()
-        
         h_opts.addWidget(QLabel("缩放:"))
         self.zoom_spin = QSpinBox()
         self.zoom_spin.setRange(25, 300)
@@ -320,7 +326,7 @@ class MainWindow(QMainWindow):
         grp_auth.setLayout(g_auth)
         left_layout.addWidget(grp_auth)
 
-        # 3. 🎯 ROI 数字监控 (六. 增加手动触发按钮，三. 优化识别与结果展示)
+        # 3. 🎯 ROI 数字监控与自定义报警规则
         grp_roi = QGroupBox("🎯 数字监控 (ddddocr)")
         g_roi = QVBoxLayout()
 
@@ -329,13 +335,28 @@ class MainWindow(QMainWindow):
         self.select_roi_btn.clicked.connect(self.start_roi_selection)
         h_roi_top.addWidget(self.select_roi_btn)
 
-        # 【六. 手动触发识别按钮】
-        self.manual_trigger_btn = QPushButton("🔍 手动触发")
+        # 【二. 更名为“手动检测”，并增加显式响应函数】
+        self.manual_trigger_btn = QPushButton("🔍 手动检测")
         self.manual_trigger_btn.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold;")
-        self.manual_trigger_btn.clicked.connect(self.perform_roi_ocr_check)
+        self.manual_trigger_btn.clicked.connect(self.on_manual_detect_clicked)
         h_roi_top.addWidget(self.manual_trigger_btn)
 
         g_roi.addLayout(h_roi_top)
+
+        # 【四. 新增手动输入相同数值与相同行数规则】
+        h_rule1 = QHBoxLayout()
+        h_rule1.addWidget(QLabel("相同行数:"))
+        self.target_same_count_spin = QSpinBox()
+        self.target_same_count_spin.setRange(1, 10)
+        self.target_same_count_spin.setValue(self.config.get("target_same_count", 3))
+        self.target_same_count_spin.setFixedWidth(55)
+        h_rule1.addWidget(self.target_same_count_spin)
+
+        h_rule1.addWidget(QLabel("目标数值:"))
+        self.target_value_input = QLineEdit(self.config.get("target_value", ""))
+        self.target_value_input.setPlaceholderText("留空自动检测相同")
+        h_rule1.addWidget(self.target_value_input)
+        g_roi.addLayout(h_rule1)
 
         h_roi_cfg = QHBoxLayout()
         self.roi_toggle_btn = QPushButton("▶️ 定时检测")
@@ -347,7 +368,7 @@ class MainWindow(QMainWindow):
         self.roi_interval_spin = QSpinBox()
         self.roi_interval_spin.setRange(1, 60)
         self.roi_interval_spin.setValue(self.config.get("roi_interval_sec", 2))
-        self.roi_interval_spin.setFixedWidth(65)
+        self.roi_interval_spin.setFixedWidth(55)
         h_roi_cfg.addWidget(self.roi_interval_spin)
         h_roi_cfg.addWidget(QLabel("秒"))
         g_roi.addLayout(h_roi_cfg)
@@ -356,13 +377,12 @@ class MainWindow(QMainWindow):
         self.roi_info_label.setStyleSheet("color: #38bdf8; font-size: 11px;")
         g_roi.addWidget(self.roi_info_label)
 
-        # 【三. 识别数值结果展示】
-        self.roi_result_label = QLabel("识别数值: [未识别]")
+        self.roi_result_label = QLabel("识别数值: [未检测]")
         self.roi_result_label.setStyleSheet("color: #a7f3d0; font-size: 11px; font-weight: bold;")
         self.roi_result_label.setWordWrap(True)
         g_roi.addWidget(self.roi_result_label)
 
-        self.roi_status_label = QLabel("状态: 待检测 (连续3行相同即报警)")
+        self.roi_status_label = QLabel("状态: 待检测")
         self.roi_status_label.setStyleSheet("color: #fbbf24; font-size: 11px;")
         self.roi_status_label.setWordWrap(True)
         g_roi.addWidget(self.roi_status_label)
@@ -422,12 +442,12 @@ class MainWindow(QMainWindow):
         grp_snap.setLayout(g_snap)
         left_layout.addWidget(grp_snap)
 
-        # 6. 运行日志面板（【二. 扩充日志内容框高度】）
+        # 6. 运行日志面板
         grp_log = QGroupBox("📋 运行日志")
         g_log = QVBoxLayout()
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(180) # 扩大日志框最小高度，提高可见度
+        self.log_box.setMinimumHeight(180)
         self.log_box.setStyleSheet("font-size: 11px; background-color: #11111b; color: #a6adc8; border: 1px solid #313244;")
         g_log.addWidget(self.log_box)
         grp_log.setLayout(g_log)
@@ -472,16 +492,15 @@ class MainWindow(QMainWindow):
         self.alarm_loop_timer.timeout.connect(self.execute_single_alarm_tick)
         self.alarm_remaining_counts = 0
 
-        # ROI 监控定时器
         self.roi_monitor_timer = QTimer()
         self.roi_monitor_timer.timeout.connect(self.perform_roi_ocr_check)
 
-        # 框选 Overlay
         self.roi_overlay = ROIOverlay()
         self.roi_overlay.roi_selected.connect(self.on_roi_selected)
 
-        # ---------- 系统托盘 ----------
-        self.tray = QSystemTrayIcon(QIcon.fromTheme("face-smile"), self)
+        # ---------- 系统托盘（【三. 托盘图标绑定 1.ico】） ----------
+        tray_icon = QIcon("1.ico") if os.path.exists("1.ico") else QIcon.fromTheme("face-smile")
+        self.tray = QSystemTrayIcon(tray_icon, self)
         tray_menu = QMenu()
         tray_menu.addAction("显示窗口", self.show)
         tray_menu.addAction("完全退出程序", self.quit_app)
@@ -500,7 +519,6 @@ class MainWindow(QMainWindow):
             self.load_page()
 
     def log(self, text):
-        """将输出打印到底部的日志窗口"""
         time_str = QDateTime.currentDateTime().toString("hh:mm:ss")
         self.log_box.append(f"[{time_str}] {text}")
         self.log_box.moveCursor(QTextCursor.End)
@@ -511,11 +529,13 @@ class MainWindow(QMainWindow):
             try:
                 self.std_ocr = ddddocr.DdddOcr(show_ad=False)
                 self.det_ocr = ddddocr.DdddOcr(det=True, show_ad=False)
-                print("✅ ddddocr 神经网络及 Detection 切块引擎加载成功！")
+                print("✅ ddddocr 识别引擎初始化成功！")
             except Exception as e:
-                print(f"⚠️ ddddocr 初始化失败: {e}")
+                self.std_ocr = None
+                self.det_ocr = None
+                print(f"⚠️ ddddocr 内部错误: {e}")
         else:
-            print("⚠️ 未检测到 ddddocr 模块")
+            print(f"⚠️ 未能加载 ddddocr 模块: {DDDDOCR_ERR_MSG}")
 
     def start_local_server(self):
         self.server_port = 8999
@@ -570,7 +590,23 @@ class MainWindow(QMainWindow):
             self.log("❌ 页面加载失败，请检查网络")
             self.status_label.setText("页面加载失败")
 
-    # ---------- ROI 框选与 ddddocr 识别核心 ----------
+    # ---------- 【二. 手动检测点击响应】 ----------
+    def on_manual_detect_clicked(self):
+        self.log("👆 触发【手动检测】...")
+        if not HAS_DDDDOCR or self.std_ocr is None:
+            msg = f"❌ 缺失 ddddocr 模块 (原因: {DDDDOCR_ERR_MSG or '未安装或模型缺失'})"
+            self.roi_status_label.setText(f"状态: {msg}")
+            self.log(msg)
+            self.status_label.setText("手动检测失败: 缺失 OCR 模块")
+            return
+
+        if self.roi_rect.width() <= 10 or self.roi_rect.height() <= 10:
+            self.roi_status_label.setText("状态: ⚠️ 请先点击【📐 框选区域】划定监控范围！")
+            self.log("⚠️ 区域未划定，无法执行检测！")
+            return
+
+        self.perform_roi_ocr_check()
+
     def start_roi_selection(self):
         global_geom = self.webview.mapToGlobal(QPoint(0, 0))
         rect = QRect(global_geom, self.webview.size())
@@ -583,6 +619,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("✅ ROI 框选成功")
         self.perform_roi_ocr_check()
 
+    # ---------- 【一. 修复定时检测提示】 ----------
     def toggle_roi_monitor(self):
         if self.roi_monitor_timer.isActive():
             self.roi_monitor_timer.stop()
@@ -592,9 +629,16 @@ class MainWindow(QMainWindow):
             self.log("⏹️ 定时检测已停止")
         else:
             if not HAS_DDDDOCR or self.std_ocr is None:
-                self.roi_status_label.setText("❌ 缺少 ddddocr 模块！无法运行")
-                self.log("❌ 缺失 ddddocr 模块，开启失败")
+                err = DDDDOCR_ERR_MSG or "未安装 ddddocr 依赖"
+                self.roi_status_label.setText(f"❌ 缺失 ddddocr 模块 ({err})，开启失败")
+                self.log(f"❌ 定时检测开启失败，缺失 ddddocr 模块: {err}")
                 return
+
+            if self.roi_rect.width() <= 10 or self.roi_rect.height() <= 10:
+                self.roi_status_label.setText("状态: ⚠️ 请先【📐 框选区域】后再开启定时检测！")
+                self.log("⚠️ 无法开启定时检测：尚未划定 ROI 区域")
+                return
+
             sec = self.roi_interval_spin.value()
             self.roi_monitor_timer.start(sec * 1000)
             self.roi_toggle_btn.setText("⏸️ 停止定时")
@@ -604,12 +648,10 @@ class MainWindow(QMainWindow):
             self.perform_roi_ocr_check()
 
     def perform_roi_ocr_check(self):
-        """【三. 强化的识别算法，确保直观反馈】"""
         if self.roi_rect.width() <= 0 or self.roi_rect.height() <= 0:
             self.roi_result_label.setText("识别数值: [ROI区域无效]")
             return
 
-        # 1. 抓取 ROI 图像并写入内存流 QBuffer
         pixmap = self.webview.grab(self.roi_rect)
         if pixmap.isNull():
             self.roi_result_label.setText("识别数值: [截图为空]")
@@ -628,15 +670,14 @@ class MainWindow(QMainWindow):
         row_digit_list = []
         raw_text_list = []
 
-        # 方案 A: 整体算法识别
+        # 1. 全局识别
         try:
             raw_res = self.std_ocr.classification(img_bytes)
-            if raw_res:
-                raw_text_list.append(raw_res)
+            if raw_res: raw_text_list.append(raw_res)
         except Exception as e:
             print(f"Standard OCR error: {e}")
 
-        # 方案 B: Det 智能图像切块识别
+        # 2. Det 切块识别
         try:
             bboxes = self.det_ocr.detection(img_bytes)
             if bboxes:
@@ -680,55 +721,60 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Det OCR error: {e}")
 
-        # 提炼结果：如果没有拿到切块数字，尝试从整体文本中过滤提取数字
         if not row_digit_list and raw_text_list:
             for txt in raw_text_list:
                 digits = "".join(filter(str.isdigit, txt))
-                if digits:
-                    row_digit_list.append(digits)
+                if digits: row_digit_list.append(digits)
 
-        # 在界面和日志中反馈识别结果
+        # 反馈识别到的数据
         if row_digit_list:
             res_text = " | ".join(row_digit_list)
             self.roi_result_label.setText(f"识别数值: [{res_text}]")
-            self.log(f"🎯 提取成功，行数值: {row_digit_list}")
+            self.log(f"🎯 提取成功，数值列表: {row_digit_list}")
         else:
             raw_display = " / ".join(raw_text_list) if raw_text_list else "无"
-            self.roi_result_label.setText(f"识别数值: [未识别到数字 (原始文本: {raw_display})]")
-            self.log(f"🔍 未筛选出数字 (ddddocr识别到的原始文本为: '{raw_display}')")
+            self.roi_result_label.setText(f"识别数值: [未提取到数字 (原始: {raw_display})]")
+            self.log(f"🔍 未提取到纯数字 (原始识别文本: '{raw_display}')")
 
-        # 2. 判断逻辑：“有3行靠在一起的相同”
+        # 【四. 核心逻辑判断：结合手动输入的“相同行数”与“目标数值”】
+        target_same_n = self.target_same_count_spin.value()
+        user_target_val = self.target_value_input.text().strip()
+
+        has_alarm = False
         matched_value = None
-        has_3_consecutive_same = False
-        match_start_idx = -1
 
-        for i in range(len(row_digit_list) - 2):
-            val1 = row_digit_list[i]
-            val2 = row_digit_list[i+1]
-            val3 = row_digit_list[i+2]
-            if val1 and val1 == val2 and val2 == val3:
-                has_3_consecutive_same = True
-                matched_value = val1
-                match_start_idx = i
-                break
+        if user_target_val:
+            # 模式 A: 用户设定了具体数值
+            count = row_digit_list.count(user_target_val)
+            if count >= target_same_n:
+                has_alarm = True
+                matched_value = user_target_val
+        else:
+            # 模式 B: 自动判断 N 行连续相同的数值
+            for i in range(len(row_digit_list) - target_same_n + 1):
+                sub_group = row_digit_list[i : i + target_same_n]
+                if sub_group and all(x == sub_group[0] for x in sub_group):
+                    has_alarm = True
+                    matched_value = sub_group[0]
+                    break
 
-        # 3. 变化响应与报警
-        current_signature = f"{match_start_idx}:{matched_value}" if has_3_consecutive_same else None
+        # 触发报警
+        current_signature = f"{matched_value}_{user_target_val}_{target_same_n}" if has_alarm else None
 
-        if has_3_consecutive_same:
+        if has_alarm:
             if current_signature != self.last_alarm_signature:
-                msg = f"🚨 发现 3 行相同数字 [{matched_value}] (触发报警！)"
+                msg = f"🚨 发现匹配数值 [{matched_value}] (已达到 {target_same_n} 次匹配)！"
                 self.roi_status_label.setText(f"状态: {msg}")
                 self.status_label.setText(msg)
-                self.log(f"⚠️ 【报警触发】连续3行数值均为 [{matched_value}]！")
+                self.log(f"⚠️ 【报警触发】数值 [{matched_value}] 满足条件！")
                 self.trigger_alarm_sound()
                 self.last_alarm_signature = current_signature
             else:
-                self.roi_status_label.setText(f"状态: 连续3行相同 [{matched_value}] (已报警)")
+                self.roi_status_label.setText(f"状态: 连续匹配 [{matched_value}] (已报警)")
         else:
             self.last_alarm_signature = None
-            display_str = " -> ".join(row_digit_list[-3:]) if row_digit_list else "无"
-            self.roi_status_label.setText(f"状态: 监控中 | 最近数据: [{display_str}]")
+            rule_tip = f"特定值 '{user_target_val}'" if user_target_val else f"连续 {target_same_n} 行相同"
+            self.roi_status_label.setText(f"状态: 监控中 | 规则: {rule_tip}")
 
     # ---------- 音频控制与辅助函数 ----------
     def on_sound_selection_changed(self, index):
@@ -822,6 +868,8 @@ class MainWindow(QMainWindow):
         self.config["reminder_sound_count"] = self.rem_count.value()
         self.config["roi_rect"] = [self.roi_rect.x(), self.roi_rect.y(), self.roi_rect.width(), self.roi_rect.height()]
         self.config["roi_interval_sec"] = self.roi_interval_spin.value()
+        self.config["target_same_count"] = self.target_same_count_spin.value()
+        self.config["target_value"] = self.target_value_input.text().strip()
         
         save_config(self.config)
         self.log("💾 配置文件保存成功！")
