@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V10.5 - 选框拖拽缩放/去除误报/无限制倒计时检测版)
+网页刷新数字监控 (V10.6 - 选框齿轮交互/延时回车/避刷检测/布局重构版)
 更新日志：
- 1. 选框交互升级：支持选中框随心拖拽移动、拖拽四角句柄拉伸缩放，方便全屏/窗口下精准微调。
- 2. 移除误报日志：彻底删除了“页面加载失败 请检查网络”提示，避免干扰。
- 3. 间隔上限解除：检测间隔最大值解除 60s 限制（支持上限 999999 秒）。
- 4. 增加了检测倒计时：定时检测开启时增加实时秒级倒计时显示。
- 5. 继承 V10.4 算法：表格去线与多行数字精准切割识别。
+ 1. 粘贴自动回车：一键粘贴后延迟 1 秒自动触发 Enter 键提交登录。
+ 2. 选框齿轮交互：选框旁增加 ⚙️ 小齿轮，点击直接调整选框，编辑时变为 ✅完成 按钮。
+ 3. 避刷检测算法：检测间隔设为刷新间隔倍数 + 5 秒延迟，防止刷新中误检测。
+ 4. 联动折叠升级：声音与报警提醒纳入顶部折叠面板，一键收起/展开。
+ 5. 保存配置独立：【保存配置】变为截图与扫码下方的独立按钮。
+ 6. 布局结构重构：截图与扫码移至声音报警面板下方。
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -61,7 +62,7 @@ def load_config():
         "reminder_custom_path": "",
         "reminder_sound_count": 3,
         "roi_list": [[100, 100, 300, 200]],
-        "roi_interval_sec": 2,
+        "roi_multiplier": 1,
         "target_same_count": 3,
         "target_value": ""
     }
@@ -96,16 +97,16 @@ def get_all_local_ips():
     return sorted(list(set(ip_list)))
 
 
-# ==================== 4. 联动折叠组件 ====================
+# ==================== 4. 改进四：三合一联动折叠组件 ====================
 class CombinedCollapsiblePanel(QWidget):
-    """ 将【页面设置与刷新】和【账号密码】合并管理 """
+    """ 将【页面设置】、【账号密码】与【声音报警】合并收起/展开 """
     def __init__(self, parent=None):
         super().__init__(parent)
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(4)
 
-        self.toggle_btn = QPushButton("▲ 页面设置与账号密码 (点击收起)")
+        self.toggle_btn = QPushButton("▲ 页面设置、账号密码与报警 (点击收起)")
         self.toggle_btn.setStyleSheet("""
             QPushButton {
                 background-color: #262636;
@@ -134,12 +135,12 @@ class CombinedCollapsiblePanel(QWidget):
         self.is_collapsed = not self.is_collapsed
         self.container.setVisible(not self.is_collapsed)
         if self.is_collapsed:
-            self.toggle_btn.setText("▼ 页面设置与账号密码 (点击展开)")
+            self.toggle_btn.setText("▼ 页面设置、账号密码与报警 (点击展开)")
         else:
-            self.toggle_btn.setText("▲ 页面设置与账号密码 (点击收起)")
+            self.toggle_btn.setText("▲ 页面设置、账号密码与报警 (点击收起)")
 
 
-# ==================== 5. 支持随时拖拽与角点缩放的 ROI 覆盖层 ====================
+# ==================== 5. 改进二：选框带 ⚙️/✅完成 按钮的 ROI 覆盖层 ====================
 class PersistentROIOverlay(QWidget):
     roi_list_selected = Signal(list)
     clear_alarm_requested = Signal(int)
@@ -161,6 +162,7 @@ class PersistentROIOverlay(QWidget):
         
         self.alarm_states = {}
         self.clear_btn_rects = {}
+        self.gear_btn_rects = {}  # 存放小齿轮/完成按钮的热区
 
         self.bar = QWidget(self)
         self.bar.setStyleSheet("background-color: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;")
@@ -237,8 +239,7 @@ class PersistentROIOverlay(QWidget):
         self.update()
 
     def _get_handle_at(self, rect, pos):
-        """ 检测点击位置是属于 4 个角点拉伸还是整体移动 """
-        s = 12  # 碰撞判定响应区域
+        s = 12
         x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
 
         if (pos - QPoint(x, y)).manhattanLength() <= s: return 'NW'
@@ -252,6 +253,15 @@ class PersistentROIOverlay(QWidget):
         if event.button() == Qt.LeftButton:
             pos = event.globalPosition().toPoint()
 
+            # 改进二：优先检测点击【小齿轮/完成】按钮
+            for box_idx, gear_r in self.gear_btn_rects.items():
+                if gear_r.contains(pos):
+                    if self.is_editing:
+                        self.finish_editing()
+                    else:
+                        self.start_editing(self.rects)
+                    return
+
             if not self.is_editing:
                 for box_idx, btn_r in self.clear_btn_rects.items():
                     if btn_r.contains(pos):
@@ -262,7 +272,6 @@ class PersistentROIOverlay(QWidget):
             if self.bar.geometry().contains(self.mapFromGlobal(pos)):
                 return
 
-            # 逆序判断，优先命中最上层的选框
             for idx in reversed(range(len(self.rects))):
                 r = self.rects[idx]
                 action = self._get_handle_at(r, pos)
@@ -273,7 +282,6 @@ class PersistentROIOverlay(QWidget):
                     self.orig_rect = QRect(r)
                     return
 
-            # 点击在空白区域，开始画新框
             self.drag_action = 'DRAW'
             self.drag_start_pos = pos
             self.current_draw_rect = QRect(pos, pos)
@@ -320,6 +328,7 @@ class PersistentROIOverlay(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         self.clear_btn_rects.clear()
+        self.gear_btn_rects.clear()
 
         if self.is_editing:
             painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
@@ -345,6 +354,24 @@ class PersistentROIOverlay(QWidget):
             painter.setPen(QPen(QColor("#000000")))
             painter.drawText(badge_rect, Qt.AlignCenter, f"#{i}")
 
+            # 改进二：小齿轮 / 完成 按钮 (紧贴角标右边)
+            gear_w, gear_h = (55, 22) if self.is_editing else (28, 22)
+            gear_x = badge_rect.x() + badge_rect.width() + 4
+            gear_y = badge_rect.y()
+            
+            global_gear_r = QRect(r.x() + 42 + 4, max(0, r.y() - 22), gear_w, gear_h)
+            self.gear_btn_rects[i] = global_gear_r
+
+            local_gear_r = QRect(gear_x, gear_y, gear_w, gear_h)
+            if self.is_editing:
+                painter.fillRect(local_gear_r, QColor("#10b981"))
+                painter.setPen(QPen(QColor("#ffffff")))
+                painter.drawText(local_gear_r, Qt.AlignCenter, "✅完成")
+            else:
+                painter.fillRect(local_gear_r, QColor("#3b82f6"))
+                painter.setPen(QPen(QColor("#ffffff")))
+                painter.drawText(local_gear_r, Qt.AlignCenter, "⚙️")
+
             # 编辑模式下绘制 4 个拉伸 Handle 角点
             if self.is_editing:
                 handle_size = 8
@@ -364,7 +391,6 @@ class PersistentROIOverlay(QWidget):
                 painter.setPen(QPen(QColor("#ffffff")))
                 painter.drawText(local_btn_r, Qt.AlignCenter, "🔕 消除报警")
 
-        # 绘制新建中的选框
         if self.is_editing and self.drag_action == 'DRAW' and self.current_draw_rect:
             local_draw = QRect(self.mapFromGlobal(self.current_draw_rect.topLeft()), self.current_draw_rect.size())
             painter.setCompositionMode(QPainter.CompositionMode_Clear)
@@ -440,7 +466,7 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V10.5 - 选框拖拽缩放/无限制倒计时检测版)")
+        self.setWindowTitle("网页刷新数字监控 (V10.6 - 选框齿轮/延时回车/避刷检测版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -478,9 +504,10 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
 
-        # 【页面设置与账号密码】
+        # 改进四：【三合一联动折叠面板】
         self.combined_panel = CombinedCollapsiblePanel()
         
+        # 1. 页面设置与刷新
         grp_url = QGroupBox("一. 页面设置与刷新")
         g_url = QVBoxLayout(grp_url)
         
@@ -527,7 +554,8 @@ class MainWindow(QMainWindow):
 
         self.combined_panel.container_layout.addWidget(grp_url)
 
-        grp_auth = QGroupBox("二. 账号密码与配置保存")
+        # 2. 账号密码
+        grp_auth = QGroupBox("二. 账号密码")
         g_auth = QVBoxLayout(grp_auth)
         
         h_creds = QHBoxLayout()
@@ -539,25 +567,56 @@ class MainWindow(QMainWindow):
         h_creds.addWidget(self.password_input)
         g_auth.addLayout(h_creds)
 
-        h_btns = QHBoxLayout()
-        self.paste_btn = QPushButton("📋 一键粘贴")
-        self.paste_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.paste_btn = QPushButton("📋 一键粘贴 (延迟1s自动回车)")
+        self.paste_btn.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold; padding: 5px;")
         self.paste_btn.clicked.connect(self.paste_credentials)
-        
-        self.save_btn = QPushButton("💾 保存配置")
-        self.save_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.save_btn.clicked.connect(self.save_settings)
-        self.save_btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white;")
-        
-        h_btns.addWidget(self.paste_btn)
-        h_btns.addWidget(self.save_btn)
-        g_auth.addLayout(h_btns)
+        g_auth.addWidget(self.paste_btn)
 
         self.combined_panel.container_layout.addWidget(grp_auth)
+
+        # 3. 改进四：声音与报警提醒纳入折叠
+        grp_reminder = QGroupBox("三. 声音与报警提醒")
+        g_reminder = QVBoxLayout(grp_reminder)
+        
+        h_rem_sound = QHBoxLayout()
+        h_rem_sound.addWidget(QLabel("声音选择:"))
+        self.sound_combo = QComboBox()
+        self.populate_sound_options()
+        self.sound_combo.currentIndexChanged.connect(self.on_sound_selection_changed)
+        h_rem_sound.addWidget(self.sound_combo, stretch=1)
+        
+        self.listen_btn = QPushButton("🎵 试听")
+        self.listen_btn.clicked.connect(lambda: self.trigger_single_sound()) 
+        h_rem_sound.addWidget(self.listen_btn)
+
+        g_reminder.addLayout(h_rem_sound)
+        self.combined_panel.container_layout.addWidget(grp_reminder)
+
         left_layout.addWidget(self.combined_panel)
 
-        # 🎯 数字监控面板
-        grp_roi = QGroupBox("🎯 数字监控 (选框可随时拖拽拉伸)")
+        # 4. 改进六：截图与扫码在声音报警下方
+        grp_snap = QGroupBox("四. 截图与扫码")
+        g_snap = QHBoxLayout(grp_snap)
+        
+        g_snap.addWidget(QLabel("本机IP:"))
+        self.ip_combo = QComboBox()
+        g_snap.addWidget(self.ip_combo, stretch=1)
+        
+        self.snap_btn = QPushButton("📸 一键截图+二维码")
+        self.snap_btn.clicked.connect(self.take_screenshot)
+        self.snap_btn.setStyleSheet("font-weight: bold; background-color: #10b981; color: white; padding: 5px;")
+        g_snap.addWidget(self.snap_btn)
+        
+        left_layout.addWidget(grp_snap)
+
+        # 5. 改进五：保存配置放在截图与扫码下面，为单独按钮
+        self.save_btn = QPushButton("💾 保存配置")
+        self.save_btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white; padding: 7px; font-size: 13px; border-radius: 4px;")
+        self.save_btn.clicked.connect(self.save_settings)
+        left_layout.addWidget(self.save_btn)
+
+        # 6. 🎯 数字监控面板
+        grp_roi = QGroupBox("🎯 数字监控 (选框可随时拖拽拉伸/齿轮调整)")
         g_roi = QVBoxLayout()
 
         h_roi_top = QHBoxLayout()
@@ -581,7 +640,7 @@ class MainWindow(QMainWindow):
         self.target_same_count_spin = QSpinBox()
         self.target_same_count_spin.setRange(1, 10)
         self.target_same_count_spin.setValue(self.config.get("target_same_count", 3))
-        self.target_same_count_spin.setFixedWidth(70)
+        self.target_same_count_spin.setFixedWidth(65)
         h_rule1.addWidget(self.target_same_count_spin)
 
         h_rule1.addWidget(QLabel("目标数值:"))
@@ -596,18 +655,16 @@ class MainWindow(QMainWindow):
         self.roi_toggle_btn.setStyleSheet("background-color: #10b981; color: white; font-weight: bold;")
         h_roi_cfg.addWidget(self.roi_toggle_btn)
 
-        h_roi_cfg.addWidget(QLabel("检测间隔:"))
-        
-        # 改进三：解除 60s 限制，范围设为 1 ~ 999999 秒
-        self.roi_interval_spin = QSpinBox()
-        self.roi_interval_spin.setRange(1, 999999)
-        self.roi_interval_spin.setValue(self.config.get("roi_interval_sec", 2))
-        self.roi_interval_spin.setFixedWidth(85)
-        h_roi_cfg.addWidget(self.roi_interval_spin)
-        h_roi_cfg.addWidget(QLabel("秒"))
+        # 改进三：检测间隔改为检测间隔（刷新倍数）
+        h_roi_cfg.addWidget(QLabel("检测间隔(刷新倍数):"))
+        self.roi_multiplier_spin = QSpinBox()
+        self.roi_multiplier_spin.setRange(1, 1000)
+        self.roi_multiplier_spin.setValue(self.config.get("roi_multiplier", 1))
+        self.roi_multiplier_spin.setFixedWidth(60)
+        h_roi_cfg.addWidget(self.roi_multiplier_spin)
+        h_roi_cfg.addWidget(QLabel("倍"))
         g_roi.addLayout(h_roi_cfg)
 
-        # 改进四：检测倒计时标签
         self.roi_countdown_label = QLabel("")
         self.roi_countdown_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
         g_roi.addWidget(self.roi_countdown_label)
@@ -629,47 +686,12 @@ class MainWindow(QMainWindow):
         grp_roi.setLayout(g_roi)
         left_layout.addWidget(grp_roi)
 
-        # 🔔 声音与报警提醒
-        grp_reminder = QGroupBox("🔔 声音与报警提醒")
-        g_reminder = QVBoxLayout()
-        
-        h_rem_sound = QHBoxLayout()
-        h_rem_sound.addWidget(QLabel("声音选择:"))
-        self.sound_combo = QComboBox()
-        self.populate_sound_options()
-        self.sound_combo.currentIndexChanged.connect(self.on_sound_selection_changed)
-        h_rem_sound.addWidget(self.sound_combo, stretch=1)
-        
-        self.listen_btn = QPushButton("🎵 试听")
-        self.listen_btn.clicked.connect(lambda: self.trigger_single_sound()) 
-        h_rem_sound.addWidget(self.listen_btn)
-
-        g_reminder.addLayout(h_rem_sound)
-        grp_reminder.setLayout(g_reminder)
-        left_layout.addWidget(grp_reminder)
-
-        # 截图与扫码
-        grp_snap = QGroupBox("截图与扫码")
-        g_snap = QHBoxLayout()
-        
-        g_snap.addWidget(QLabel("本机IP:"))
-        self.ip_combo = QComboBox()
-        g_snap.addWidget(self.ip_combo, stretch=1)
-        
-        self.snap_btn = QPushButton("📸 一键截图+二维码")
-        self.snap_btn.clicked.connect(self.take_screenshot)
-        self.snap_btn.setStyleSheet("font-weight: bold; background-color: #10b981; color: white;")
-        g_snap.addWidget(self.snap_btn)
-        
-        grp_snap.setLayout(g_snap)
-        left_layout.addWidget(grp_snap)
-
         # 📋 运行日志面板
         grp_log = QGroupBox("📋 运行日志")
         g_log = QVBoxLayout()
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(150)
+        self.log_box.setMinimumHeight(120)
         self.log_box.setStyleSheet("font-size: 11px; background-color: #11111b; color: #a6adc8; border: 1px solid #313244;")
         g_log.addWidget(self.log_box)
         grp_log.setLayout(g_log)
@@ -678,7 +700,7 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("系统就绪")
         left_layout.addWidget(self.status_label)
 
-        # ---------- 中间折叠栏 ----------
+        # ---------- 中载折叠栏 ----------
         self.toggle_bar = QWidget()
         self.toggle_bar.setFixedWidth(14)
         toggle_layout = QVBoxLayout(self.toggle_bar)
@@ -712,7 +734,6 @@ class MainWindow(QMainWindow):
         self.alarm_loop_timer = QTimer()
         self.alarm_loop_timer.timeout.connect(self.execute_single_alarm_tick)
 
-        # 改进四：检测倒计时 Timer
         self.roi_clock_timer = QTimer()
         self.roi_clock_timer.timeout.connect(self.on_roi_clock_tick)
         self.roi_remaining_seconds = 0
@@ -734,7 +755,7 @@ class MainWindow(QMainWindow):
         self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
         
-        self.log("🚀 系统初始化完成 (V10.5 - 选框拖拽缩放/无限制倒计时检测版)")
+        self.log("🚀 系统初始化完成 (V10.6 - 选框齿轮/延时回车/避刷检测版)")
         if self.config["url"]:
             self.load_page()
 
@@ -821,7 +842,6 @@ class MainWindow(QMainWindow):
         self.log(f"🌐 正在加载页面: {url}")
         self.webview.load(QUrl(url))
 
-    # 改进二：网页加载完成，删除了原先误报的失败提示日志
     def on_load_finished(self, ok):
         if ok:
             self.log("✅ 页面加载完毕")
@@ -829,7 +849,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self.paste_credentials)
 
     def start_roi_selection(self):
-        self.log("提示：可拖拽已有选框移动，按住四角句柄拉伸，或拖拽绘制新框")
+        self.log("提示：可拖拽选框旁 ⚙️ 齿轮开始微调，拖拽角点缩放，或划线新建框")
         self.roi_overlay.start_editing(self.roi_list)
 
     def clear_all_rois(self):
@@ -868,7 +888,12 @@ class MainWindow(QMainWindow):
 
         self.perform_roi_ocr_check()
 
-    # 改进四：支持检测间隔秒级倒计时逻辑
+    # 改进三：计算公式：刷新间隔 * 倍数 + 5秒
+    def calc_roi_check_interval(self):
+        auto_sec = self.auto_interval.value()
+        mult = self.roi_multiplier_spin.value()
+        return auto_sec * mult + 5
+
     def toggle_roi_monitor(self):
         if self.roi_clock_timer.isActive():
             self.roi_clock_timer.stop()
@@ -889,27 +914,27 @@ class MainWindow(QMainWindow):
                 self.log("⚠️ 无法开启定时检测：尚未划定任何 ROI 区域")
                 return
 
-            sec = self.roi_interval_spin.value()
+            sec = self.calc_roi_check_interval()
             self.roi_remaining_seconds = sec
-            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒 (刷新{self.auto_interval.value()}s×{self.roi_multiplier_spin.value()}+5s)")
             self.roi_clock_timer.start(1000)
 
             self.roi_toggle_btn.setText("⏸️ 停止定时")
             self.roi_toggle_btn.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
             self.roi_status_label.setText("状态: 正在定时检测中...")
-            self.log(f"▶️ 定时检测开启，间隔: {sec}秒")
+            self.log(f"▶️ 定时检测开启，周期: {sec}秒 (刷新间隔{self.auto_interval.value()}s × {self.roi_multiplier_spin.value()} + 5s延时)")
             self.perform_roi_ocr_check()
 
     def on_roi_clock_tick(self):
         if self.roi_remaining_seconds > 1:
             self.roi_remaining_seconds -= 1
-            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒 (刷新{self.auto_interval.value()}s×{self.roi_multiplier_spin.value()}+5s)")
         else:
             self.perform_roi_ocr_check()
-            self.roi_remaining_seconds = self.roi_interval_spin.value()
-            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
+            self.roi_remaining_seconds = self.calc_roi_check_interval()
+            self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒 (刷新{self.auto_interval.value()}s×{self.roi_multiplier_spin.value()}+5s)")
 
-    # 多行表格切割识别算法
+    # 表格图像识别算法
     def segment_rows(self, img_bgr):
         h_img, w_img = img_bgr.shape[:2]
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -919,7 +944,6 @@ class MainWindow(QMainWindow):
         else:
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # 滤除横向表格线
         kernel_len = max(10, w_img // 3)
         horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
         horiz_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horiz_kernel)
@@ -943,7 +967,6 @@ class MainWindow(QMainWindow):
         if in_row and (len(proj) - start_y) >= min_row_height:
             rows.append((max(0, start_y - 2), h_img))
 
-        # 轮廓垂直聚类兜底
         if not rows or (len(rows) == 1 and (rows[0][1] - rows[0][0]) > h_img * 0.75 and h_img > 30):
             contours, _ = cv2.findContours(binary_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             boxes = []
@@ -1127,6 +1150,7 @@ class MainWindow(QMainWindow):
             else:
                 self.sound_combo.setCurrentIndex(0)
 
+    # 改进一：粘贴后延迟 1 秒触发回车
     def paste_credentials(self):
         account = self.account_input.text().strip()
         password = self.password_input.text().strip()
@@ -1135,6 +1159,7 @@ class MainWindow(QMainWindow):
         safe_password = json.dumps(password)
         js_cmd = f"if (typeof window.__fillV7 === 'function') {{ window.__fillV7({safe_account}, {safe_password}); }}"
         self.webview.page().runJavaScript(js_cmd)
+        self.log("📋 已一键粘贴账号密码，1秒后自动回车提交...")
 
     def take_screenshot(self):
         target_dir = self.config.get("screenshot_path", os.getcwd())
@@ -1173,7 +1198,7 @@ class MainWindow(QMainWindow):
         self.config["reminder_custom_path"] = self.custom_sound_path
         
         self.config["roi_list"] = [[r.x(), r.y(), r.width(), r.height()] for r in self.roi_list]
-        self.config["roi_interval_sec"] = self.roi_interval_spin.value()
+        self.config["roi_multiplier"] = self.roi_multiplier_spin.value()
         self.config["target_same_count"] = self.target_same_count_spin.value()
         self.config["target_value"] = self.target_value_input.text().strip()
         
@@ -1250,7 +1275,7 @@ class MainWindow(QMainWindow):
         os._exit(0)
 
 
-# ==================== 8. JS 自动填表与启动程序入口 ====================
+# ==================== 8. JS 自动填表与 1s 延迟回车注入脚本 ====================
 INJECT_SCRIPT = r"""
 (function() {
     function simulateInput(target, value) {
@@ -1264,12 +1289,39 @@ INJECT_SCRIPT = r"""
         target.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
     }
+
+    function triggerEnter(target) {
+        if (!target) return;
+        ['keydown', 'keypress', 'keyup'].forEach(function(eventType) {
+            let ev = new KeyboardEvent(eventType, {
+                bubbles: true,
+                cancelable: true,
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13
+            });
+            target.dispatchEvent(ev);
+        });
+        if (target.form) {
+            try {
+                if (typeof target.form.requestSubmit === 'function') {
+                    target.form.requestSubmit();
+                } else {
+                    target.form.submit();
+                }
+            } catch(e) {}
+        }
+    }
+
     function findAndFill(account, password) {
+        let activeTarget = null;
         let pwdInputs = document.querySelectorAll('input[type="password"]');
         if (pwdInputs.length > 0) {
             for (let pwd of pwdInputs) {
                 if (pwd.offsetParent !== null || pwd.offsetWidth > 0 || pwd.offsetHeight > 0) {
                     simulateInput(pwd, password);
+                    activeTarget = pwd;
                     let form = pwd.form;
                     if (form) {
                         let formInputs = form.querySelectorAll('input:not([type="hidden"]):not([type="password"]):not([type="submit"]):not([type="button"])');
@@ -1293,8 +1345,15 @@ INJECT_SCRIPT = r"""
                 }
             }
         }
+
+        // 延迟 1 秒自动触发回车键提交
+        setTimeout(function() {
+            triggerEnter(activeTarget || document.activeElement);
+        }, 1000);
+
         return true;
     }
+
     window.__fillV7 = function(account, password) {
         findAndFill(account, password);
     };
