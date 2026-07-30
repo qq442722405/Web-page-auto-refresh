@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V10.8 - 增量智能防重报警版)
+网页刷新数字监控 (V11.0 - 全局统一控制与右上角控制栏版)
 更新日志：
- 1. 增量消除逻辑：彻底解决消除报警后，因表格每2小时新增行导致旧报警重复触发的问题。
- 2. 目标数值记忆：记录已消除的目标数值出现次数，未新增目标数值不报警。
- 3. 相同行数记忆：记录已消除的匹配位置特征，追加新行时不触发旧位置报警。
+ 1. 取消各监视窗口单框齿轮，界面保持简洁。
+ 2. 屏幕右上角常驻全局控制栏：
+    - ⏱️ 实时显示【网页刷新倒计时】与【OCR检测倒计时】
+    - 👁️ 一键【隐藏/显示所有识别窗口】
+    - ⚙️ 点击统一【调整所有框选窗口】（拖拽/拉伸/增删框选）
+ 3. 继承 V10.8 增量防重复报警逻辑，解决消除报警后表格新增行导致误报的问题。
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -94,7 +97,7 @@ def get_all_local_ips():
     return sorted(list(set(ip_list)))
 
 
-# ==================== 4. 全功能收起/展开折叠面板 ====================
+# ==================== 4. 折叠面板组件 ====================
 class CombinedCollapsiblePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -136,7 +139,7 @@ class CombinedCollapsiblePanel(QWidget):
             self.toggle_btn.setText("▲ 基础配置与设置 (点击收起面板)")
 
 
-# ==================== 5. ROI 覆盖层 ====================
+# ==================== 5. ROI 覆盖层与右上角控制栏 ====================
 class PersistentROIOverlay(QWidget):
     roi_list_selected = Signal(list)
     clear_alarm_requested = Signal(int)
@@ -148,6 +151,7 @@ class PersistentROIOverlay(QWidget):
 
         self.rects = []
         self.is_editing = False
+        self.boxes_visible = True  # 是否显示识别框
         
         self.drag_idx = None
         self.drag_action = None 
@@ -157,8 +161,8 @@ class PersistentROIOverlay(QWidget):
         
         self.alarm_states = {}
         self.clear_btn_rects = {}
-        self.gear_btn_rects = {}
 
+        # 1. 顶部中间编辑工具栏
         self.bar = QWidget(self)
         self.bar.setStyleSheet("background-color: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;")
         bar_layout = QHBoxLayout(self.bar)
@@ -184,6 +188,50 @@ class PersistentROIOverlay(QWidget):
         bar_layout.addWidget(self.btn_done)
         bar_layout.addWidget(self.btn_clear)
         bar_layout.addWidget(self.btn_cancel)
+        self.bar.hide()
+
+        # 2. 右上角常驻控制栏
+        self.top_right_bar = QWidget(self)
+        self.top_right_bar.setStyleSheet("""
+            QWidget {
+                background-color: #181825;
+                border: 1px solid #45475a;
+                border-radius: 6px;
+            }
+            QLabel {
+                color: #38bdf8;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 0 4px;
+            }
+            QPushButton {
+                background-color: #313244;
+                color: #cdd6f4;
+                border: 1px solid #45475a;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #45475a;
+                color: #ffffff;
+            }
+        """)
+        tr_layout = QHBoxLayout(self.top_right_bar)
+        tr_layout.setContentsMargins(8, 4, 8, 4)
+        tr_layout.setSpacing(6)
+
+        self.lbl_countdown = QLabel("⏱️ 刷新: --s | 检测: --s", self.top_right_bar)
+        self.btn_toggle_vis = QPushButton("👁️ 隐藏窗口", self.top_right_bar)
+        self.btn_gear = QPushButton("⚙️ 调整窗口", self.top_right_bar)
+
+        self.btn_toggle_vis.clicked.connect(self.toggle_boxes_visibility)
+        self.btn_gear.clicked.connect(self.on_top_right_gear_clicked)
+
+        tr_layout.addWidget(self.lbl_countdown)
+        tr_layout.addWidget(self.btn_toggle_vis)
+        tr_layout.addWidget(self.btn_gear)
 
         self.show_fullscreen_overlay()
 
@@ -191,18 +239,52 @@ class PersistentROIOverlay(QWidget):
         screen = QGuiApplication.primaryScreen()
         geo = screen.geometry()
         self.setGeometry(geo)
+        self.reposition_bars()
         self.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reposition_bars()
+
+    def reposition_bars(self):
+        geo = self.geometry()
+        # 居中显示顶部编辑栏
+        self.bar.adjustSize()
+        self.bar.move((geo.width() - self.bar.width()) // 2, 20)
+
+        # 右上角显示常驻控制栏
+        self.top_right_bar.adjustSize()
+        self.top_right_bar.move(geo.width() - self.top_right_bar.width() - 20, 20)
+
+    def update_countdown_text(self, text):
+        self.lbl_countdown.setText(text)
+        self.top_right_bar.adjustSize()
+        geo = self.geometry()
+        self.top_right_bar.move(geo.width() - self.top_right_bar.width() - 20, 20)
+
+    def toggle_boxes_visibility(self):
+        self.boxes_visible = not self.boxes_visible
+        if self.boxes_visible:
+            self.btn_toggle_vis.setText("👁️ 隐藏窗口")
+        else:
+            self.btn_toggle_vis.setText("👁️ 显示窗口")
+        self.update()
+
+    def on_top_right_gear_clicked(self):
+        if self.is_editing:
+            self.finish_editing()
+        else:
+            self.boxes_visible = True
+            self.btn_toggle_vis.setText("👁️ 隐藏窗口")
+            self.start_editing(self.rects)
 
     def start_editing(self, existing_rects):
         self.is_editing = True
         self.rects = [QRect(r) for r in existing_rects]
         self.setCursor(Qt.CrossCursor)
         self.bar.show()
+        self.reposition_bars()
         self.update_tip()
-        
-        geo = self.geometry()
-        self.bar.adjustSize()
-        self.bar.move((geo.width() - self.bar.width()) // 2, 20)
         
         self.raise_()
         self.activateWindow()
@@ -248,14 +330,7 @@ class PersistentROIOverlay(QWidget):
         if event.button() == Qt.LeftButton:
             pos = event.globalPosition().toPoint()
 
-            for box_idx, gear_r in self.gear_btn_rects.items():
-                if gear_r.contains(pos):
-                    if self.is_editing:
-                        self.finish_editing()
-                    else:
-                        self.start_editing(self.rects)
-                    return
-
+            # 非编辑状态下，点击消除报警按钮
             if not self.is_editing:
                 for box_idx, btn_r in self.clear_btn_rects.items():
                     if btn_r.contains(pos):
@@ -263,7 +338,8 @@ class PersistentROIOverlay(QWidget):
                         return
                 return
 
-            if self.bar.geometry().contains(self.mapFromGlobal(pos)):
+            if self.bar.geometry().contains(self.mapFromGlobal(pos)) or \
+               self.top_right_bar.geometry().contains(self.mapFromGlobal(pos)):
                 return
 
             for idx in reversed(range(len(self.rects))):
@@ -322,10 +398,13 @@ class PersistentROIOverlay(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         self.clear_btn_rects.clear()
-        self.gear_btn_rects.clear()
 
         if self.is_editing:
             painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
+
+        # 若处于“隐藏窗口”状态且未在编辑，不绘制选框
+        if not self.boxes_visible and not self.is_editing:
+            return
 
         for i, r in enumerate(self.rects, 1):
             local_r = QRect(self.mapFromGlobal(r.topLeft()), r.size())
@@ -342,27 +421,11 @@ class PersistentROIOverlay(QWidget):
             painter.setPen(QPen(border_color, pen_width, Qt.SolidLine))
             painter.drawRect(local_r)
 
+            # 编号角标
             badge_rect = QRect(local_r.x(), max(0, local_r.y() - 22), 42, 22)
             painter.fillRect(badge_rect, border_color)
             painter.setPen(QPen(QColor("#000000")))
             painter.drawText(badge_rect, Qt.AlignCenter, f"#{i}")
-
-            gear_w, gear_h = (55, 22) if self.is_editing else (28, 22)
-            gear_x = badge_rect.x() + badge_rect.width() + 4
-            gear_y = badge_rect.y()
-            
-            global_gear_r = QRect(r.x() + 42 + 4, max(0, r.y() - 22), gear_w, gear_h)
-            self.gear_btn_rects[i] = global_gear_r
-
-            local_gear_r = QRect(gear_x, gear_y, gear_w, gear_h)
-            if self.is_editing:
-                painter.fillRect(local_gear_r, QColor("#10b981"))
-                painter.setPen(QPen(QColor("#ffffff")))
-                painter.drawText(local_gear_r, Qt.AlignCenter, "✅完成")
-            else:
-                painter.fillRect(local_gear_r, QColor("#3b82f6"))
-                painter.setPen(QPen(QColor("#ffffff")))
-                painter.drawText(local_gear_r, Qt.AlignCenter, "⚙️")
 
             if self.is_editing:
                 handle_size = 8
@@ -371,6 +434,7 @@ class PersistentROIOverlay(QWidget):
                 for corner in [local_r.topLeft(), local_r.topRight(), local_r.bottomLeft(), local_r.bottomRight()]:
                     painter.drawRect(corner.x() - handle_size // 2, corner.y() - handle_size // 2, handle_size, handle_size)
 
+            # 报警消除按钮
             if is_alarm:
                 btn_w, btn_h = 90, 22
                 global_btn_r = QRect(r.x() + r.width() - btn_w, max(0, r.y() - 25), btn_w, btn_h)
@@ -456,14 +520,14 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V10.8 - 增量智能防重报警版)")
+        self.setWindowTitle("网页刷新数字监控 (V11.0 - 全局统一控制版)")
         self.resize(1380, 880)
         self.config = load_config()
 
         if os.path.exists("1.ico"):
             self.setWindowIcon(QIcon("1.ico"))
 
-        from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+        from PySide6.QtNetwork import QNetworkAccessManager
         self.nam = QNetworkAccessManager(self)
         self.current_file_url = ""
         self.custom_sound_path = self.config.get("reminder_custom_path", "")
@@ -476,10 +540,10 @@ class MainWindow(QMainWindow):
         saved_roi_list = self.config.get("roi_list", [[100, 100, 300, 200]])
         self.roi_list = [QRect(r[0], r[1], r[2], r[3]) for r in saved_roi_list]
 
-        # 核心变动：新增已记忆消报的数量与组合特征，防止重复报警
+        # 已记忆消报的数量与组合特征
         self.box_latest_digits = {}
-        self.box_ack_count = {}      # {box_idx: int} 为目标数值模式存储已消除的数量
-        self.box_ack_matches = {}    # {box_idx: set()} 为连续行模式存储已消除的签名特征
+        self.box_ack_count = {}      
+        self.box_ack_matches = {}    
         self.box_is_alarming = {}
 
         self.start_local_server()
@@ -607,15 +671,14 @@ class MainWindow(QMainWindow):
         self.save_btn.clicked.connect(self.save_settings)
         self.combined_panel.container_layout.addWidget(self.save_btn)
 
-        # 折叠面板加入左侧主布局
         left_layout.addWidget(self.combined_panel)
 
         # 6. 🎯 数字监控面板
-        grp_roi = QGroupBox("🎯 数字监控 (选框可随时拖拽拉伸/齿轮调整)")
+        grp_roi = QGroupBox("🎯 数字监控 (通过屏幕右上角 ⚙️ 统一调整)")
         g_roi = QVBoxLayout()
 
         h_roi_top = QHBoxLayout()
-        self.select_roi_btn = QPushButton("📐 框选数字区域")
+        self.select_roi_btn = QPushButton("📐 框选调整窗口")
         self.select_roi_btn.clicked.connect(self.start_roi_selection)
         h_roi_top.addWidget(self.select_roi_btn)
 
@@ -750,8 +813,9 @@ class MainWindow(QMainWindow):
 
         self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
+        self.update_top_right_countdown_bar()
         
-        self.log("🚀 系统初始化完成 (V10.8 - 增量智能防重报警版)")
+        self.log("🚀 系统初始化完成 (V11.0 - 全局统一控制版)")
         if self.config["url"]:
             self.load_page()
 
@@ -845,7 +909,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self.paste_credentials)
 
     def start_roi_selection(self):
-        self.log("提示：可拖拽选框旁 ⚙️ 齿轮开始微调，拖拽角点缩放，或划线新建框")
+        self.log("提示：也可点击屏幕右上角 ⚙️ 统一调整所有框选窗口")
         self.roi_overlay.start_editing(self.roi_list)
 
     def clear_all_rois(self):
@@ -879,7 +943,7 @@ class MainWindow(QMainWindow):
             return
 
         if not self.roi_list:
-            self.roi_status_label.setText("状态: ⚠️ 请先点击【📐 框选数字区域】划定范围！")
+            self.roi_status_label.setText("状态: ⚠️ 请先划定框选区域！")
             self.log("⚠️ 区域未划定，无法执行检测！")
             return
 
@@ -920,6 +984,8 @@ class MainWindow(QMainWindow):
             self.roi_status_label.setText("状态: 正在定时检测中...")
             self.log(f"▶️ 定时检测开启，周期: {sec}秒")
             self.perform_roi_ocr_check()
+            
+        self.update_top_right_countdown_bar()
 
     def on_roi_clock_tick(self):
         if self.roi_remaining_seconds > 1:
@@ -929,6 +995,15 @@ class MainWindow(QMainWindow):
             self.perform_roi_ocr_check()
             self.roi_remaining_seconds = self.calc_roi_check_interval()
             self.roi_countdown_label.setText(f"⏱️ 下次检测倒计时: {self.roi_remaining_seconds}秒")
+        
+        self.update_top_right_countdown_bar()
+
+    def update_top_right_countdown_bar(self):
+        refresh_str = f"{self.remaining_seconds}s" if self.refresh_clock.isActive() else "已停止"
+        roi_str = f"{self.roi_remaining_seconds}s" if self.roi_clock_timer.isActive() else "已停止"
+        text = f"⏱️ 刷新: {refresh_str} | OCR检测: {roi_str}"
+        if hasattr(self, 'roi_overlay') and self.roi_overlay:
+            self.roi_overlay.update_countdown_text(text)
 
     def segment_rows(self, img_bgr):
         h_img, w_img = img_bgr.shape[:2]
@@ -997,7 +1072,6 @@ class MainWindow(QMainWindow):
 
         return rows
 
-    # 核心变动：增量匹配检测，消除报警后不再对已知旧数据重复报警
     def perform_roi_ocr_check(self):
         if not self.roi_list or not HAS_DDDDOCR or self.ocr is None:
             return
@@ -1056,30 +1130,23 @@ class MainWindow(QMainWindow):
                 has_new_unacked_alarm = False
 
                 if user_target_val:
-                    # 模式 A: 设定了目标数值
                     curr_count = box_digits.count(user_target_val)
                     ack_count = self.box_ack_count.get(box_idx, 0)
-
-                    # 只有当达到阈值，且数量【多于已消报的数量】时，才判定为新报警
                     if curr_count >= target_same_n and curr_count > ack_count:
                         has_new_unacked_alarm = True
                 else:
-                    # 模式 B: 未指定目标数值，连续相同行数
                     current_matches = set()
                     for i in range(len(box_digits) - target_same_n + 1):
                         sub_group = tuple(box_digits[i : i + target_same_n])
                         if sub_group and all(x == sub_group[0] for x in sub_group):
-                            # 将 (起始行索引, 数值元组) 记录为唯一的报警特征
                             current_matches.add((i, sub_group))
 
                     ack_matches = self.box_ack_matches.get(box_idx, set())
-                    # 排除掉已经点过消除报警的特征
                     new_matches = current_matches - ack_matches
 
                     if len(new_matches) > 0:
                         has_new_unacked_alarm = True
 
-                # 如果当前有之前未点消除的新报警，保持报警状态；否则不报警
                 if has_new_unacked_alarm:
                     self.box_is_alarming[box_idx] = True
 
@@ -1103,7 +1170,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"❌ OCR 运行异常: {e}")
 
-    # 点击消除单个选框的报警（增量记录已消除内容）
     def clear_alarm_for_box(self, box_idx):
         self.box_is_alarming[box_idx] = False
 
@@ -1111,10 +1177,8 @@ class MainWindow(QMainWindow):
         box_digits = self.box_latest_digits.get(box_idx, [])
 
         if user_target_val:
-            # 记录当前已消报的数值出现总次数
             self.box_ack_count[box_idx] = box_digits.count(user_target_val)
         else:
-            # 记录当前已消报的所有连续行特征组
             target_same_n = self.target_same_count_spin.value()
             current_matches = set()
             for i in range(len(box_digits) - target_same_n + 1):
@@ -1126,14 +1190,13 @@ class MainWindow(QMainWindow):
                 self.box_ack_matches[box_idx] = set()
             self.box_ack_matches[box_idx].update(current_matches)
 
-        self.log(f"🔕 已消除【区域 #{box_idx}】的报警，表格追加新行时不再重复提示旧数据")
+        self.log(f"🔕 已消除【区域 #{box_idx}】的报警，追加新行时不再重复报警")
         self.roi_overlay.set_alarm_states(self.box_is_alarming)
 
         if not any(self.box_is_alarming.values()):
             self.stop_alarm_audio()
             self.roi_status_label.setText("状态: 报警已消除，监控中...")
 
-    # 点击消除所有选框的报警
     def clear_all_alarms(self):
         for box_idx in range(1, len(self.roi_list) + 1):
             self.clear_alarm_for_box(box_idx)
@@ -1240,11 +1303,13 @@ class MainWindow(QMainWindow):
         self.remaining_seconds = self.auto_interval.value()
         self.refresh_clock.start(1000)
         self.log(f"⏱️ 自动刷新开启，间隔: {self.remaining_seconds}秒")
+        self.update_top_right_countdown_bar()
 
     def stop_auto_timer(self):
         self.refresh_clock.stop()
         self.countdown_label.setText("")
         self.log("⏱️ 自动刷新已停止")
+        self.update_top_right_countdown_bar()
 
     def on_refresh_clock_tick(self):
         if self.remaining_seconds > 1:
@@ -1253,6 +1318,7 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_page()
             self.remaining_seconds = self.auto_interval.value()
+        self.update_top_right_countdown_bar()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
