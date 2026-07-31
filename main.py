@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V11.1 - 网页局域绑定与后台免打扰版)
+网页刷新数字监控 (V11.0 - 全局统一控制与右上角控制栏版)
 更新日志：
- 1. 识别框严格限定在网页区域内部，取消全局桌面置顶。
- 2. 当切换到游戏或其他软件时，识别框不会浮在屏幕上打扰操作。
- 3. 采用底层 off-screen 渲染截屏 (webview.grab)，即使网页被游戏遮挡，后台监控与报警依然正常运作。
- 4. 采用动态 QRegion 掩码，非编辑状态下点击网页/框内任意区域均可顺畅操作网页。
+ 1. 取消各监视窗口单框齿轮，界面保持简洁。
+ 2. 屏幕右上角常驻全局控制栏：
+    - ⏱️ 实时显示【网页刷新倒计时】与【OCR检测倒计时】
+    - 👁️ 一键【隐藏/显示所有识别窗口】
+    - ⚙️ 点击统一【调整所有框选窗口】（拖拽/拉伸/增删框选）
+ 3. 继承 V10.8 增量防重复报警逻辑，解决消除报警后表格新增行导致误报的问题。
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
 
@@ -40,10 +42,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon, QMenu, QGroupBox, QSizePolicy, QFileDialog, QDialog,
     QComboBox, QTextEdit, QAbstractSpinBox
 )
-from PySide6.QtGui import (
-    QIcon, QPixmap, QPainter, QPen, QColor, QTextCursor,
-    QGuiApplication, QImage, QRegion
-)
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor, QTextCursor, QGuiApplication, QImage
 
 # ==================== 3. 基础配置与辅助函数 ====================
 CONFIG_FILE = "auto_login_config.json"
@@ -140,20 +139,19 @@ class CombinedCollapsiblePanel(QWidget):
             self.toggle_btn.setText("▲ 基础配置与设置 (点击收起面板)")
 
 
-# ==================== 5. 网页局域 ROI 覆盖层 ====================
+# ==================== 5. ROI 覆盖层与右上角控制栏 ====================
 class PersistentROIOverlay(QWidget):
     roi_list_selected = Signal(list)
     clear_alarm_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 取消 WindowStaysOnTopHint，仅作为窗口内的 Tool 工具层
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         self.rects = []
         self.is_editing = False
-        self.boxes_visible = True
+        self.boxes_visible = True  # 是否显示识别框
         
         self.drag_idx = None
         self.drag_action = None 
@@ -192,7 +190,7 @@ class PersistentROIOverlay(QWidget):
         bar_layout.addWidget(self.btn_cancel)
         self.bar.hide()
 
-        # 2. 网页右上角常驻控制栏
+        # 2. 右上角常驻控制栏
         self.top_right_bar = QWidget(self)
         self.top_right_bar.setStyleSheet("""
             QWidget {
@@ -235,48 +233,34 @@ class PersistentROIOverlay(QWidget):
         tr_layout.addWidget(self.btn_toggle_vis)
         tr_layout.addWidget(self.btn_gear)
 
-    def reposition_bars(self):
-        w = self.width()
-        self.bar.adjustSize()
-        self.bar.move((w - self.bar.width()) // 2, 10)
+        self.show_fullscreen_overlay()
 
+    def show_fullscreen_overlay(self):
+        screen = QGuiApplication.primaryScreen()
+        geo = screen.geometry()
+        self.setGeometry(geo)
+        self.reposition_bars()
+        self.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reposition_bars()
+
+    def reposition_bars(self):
+        geo = self.geometry()
+        # 居中显示顶部编辑栏
+        self.bar.adjustSize()
+        self.bar.move((geo.width() - self.bar.width()) // 2, 20)
+
+        # 右上角显示常驻控制栏
         self.top_right_bar.adjustSize()
-        self.top_right_bar.move(w - self.top_right_bar.width() - 10, 10)
-        self.update_mask()
+        self.top_right_bar.move(geo.width() - self.top_right_bar.width() - 20, 20)
 
     def update_countdown_text(self, text):
         self.lbl_countdown.setText(text)
         self.top_right_bar.adjustSize()
-        self.top_right_bar.move(self.width() - self.top_right_bar.width() - 10, 10)
-        self.update_mask()
-
-    def update_mask(self):
-        """核心掩码逻辑：非编辑模式下只保留按钮与边框的点击判定，其余全穿透至网页"""
-        if self.is_editing:
-            self.clearMask()
-            return
-
-        region = QRegion(self.top_right_bar.geometry())
-        if self.bar.isVisible():
-            region += QRegion(self.bar.geometry())
-
-        if self.boxes_visible:
-            for i, r in enumerate(self.rects, 1):
-                # 只保留 3px 的边框响应与编号角标
-                outer = QRegion(r)
-                inner = QRegion(r.adjusted(3, 3, -3, -3))
-                border_reg = outer.subtracted(inner)
-                
-                badge_r = QRect(r.x(), max(0, r.y() - 22), 42, 22)
-                region += border_reg
-                region += QRegion(badge_r)
-
-                if self.alarm_states.get(i, False):
-                    btn_w, btn_h = 90, 22
-                    btn_r = QRect(r.x() + r.width() - btn_w, max(0, r.y() - 25), btn_w, btn_h)
-                    region += QRegion(btn_r)
-
-        self.setMask(region)
+        geo = self.geometry()
+        self.top_right_bar.move(geo.width() - self.top_right_bar.width() - 20, 20)
 
     def toggle_boxes_visibility(self):
         self.boxes_visible = not self.boxes_visible
@@ -284,7 +268,6 @@ class PersistentROIOverlay(QWidget):
             self.btn_toggle_vis.setText("👁️ 隐藏窗口")
         else:
             self.btn_toggle_vis.setText("👁️ 显示窗口")
-        self.update_mask()
         self.update()
 
     def on_top_right_gear_clicked(self):
@@ -302,7 +285,9 @@ class PersistentROIOverlay(QWidget):
         self.bar.show()
         self.reposition_bars()
         self.update_tip()
-        self.update_mask()
+        
+        self.raise_()
+        self.activateWindow()
         self.update()
 
     def finish_editing(self):
@@ -310,14 +295,12 @@ class PersistentROIOverlay(QWidget):
         self.setCursor(Qt.ArrowCursor)
         self.bar.hide()
         self.roi_list_selected.emit(self.rects)
-        self.update_mask()
         self.update()
 
     def cancel_editing(self):
         self.is_editing = False
         self.setCursor(Qt.ArrowCursor)
         self.bar.hide()
-        self.update_mask()
         self.update()
 
     def clear_rects(self):
@@ -330,7 +313,6 @@ class PersistentROIOverlay(QWidget):
 
     def set_alarm_states(self, states):
         self.alarm_states = states
-        self.update_mask()
         self.update()
 
     def _get_handle_at(self, rect, pos):
@@ -346,8 +328,9 @@ class PersistentROIOverlay(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            pos = event.position().toPoint()
+            pos = event.globalPosition().toPoint()
 
+            # 非编辑状态下，点击消除报警按钮
             if not self.is_editing:
                 for box_idx, btn_r in self.clear_btn_rects.items():
                     if btn_r.contains(pos):
@@ -355,7 +338,8 @@ class PersistentROIOverlay(QWidget):
                         return
                 return
 
-            if self.bar.geometry().contains(pos) or self.top_right_bar.geometry().contains(pos):
+            if self.bar.geometry().contains(self.mapFromGlobal(pos)) or \
+               self.top_right_bar.geometry().contains(self.mapFromGlobal(pos)):
                 return
 
             for idx in reversed(range(len(self.rects))):
@@ -377,7 +361,7 @@ class PersistentROIOverlay(QWidget):
         if not self.is_editing or not self.drag_action:
             return
 
-        pos = event.position().toPoint()
+        pos = event.globalPosition().toPoint()
         delta = pos - self.drag_start_pos
 
         if self.drag_action == 'MOVE' and self.drag_idx is not None:
@@ -418,10 +402,12 @@ class PersistentROIOverlay(QWidget):
         if self.is_editing:
             painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
 
+        # 若处于“隐藏窗口”状态且未在编辑，不绘制选框
         if not self.boxes_visible and not self.is_editing:
             return
 
-        for i, local_r in enumerate(self.rects, 1):
+        for i, r in enumerate(self.rects, 1):
+            local_r = QRect(self.mapFromGlobal(r.topLeft()), r.size())
             is_alarm = self.alarm_states.get(i, False)
 
             if self.is_editing:
@@ -451,20 +437,22 @@ class PersistentROIOverlay(QWidget):
             # 报警消除按钮
             if is_alarm:
                 btn_w, btn_h = 90, 22
-                local_btn_r = QRect(local_r.x() + local_r.width() - btn_w, max(0, local_r.y() - 25), btn_w, btn_h)
-                self.clear_btn_rects[i] = local_btn_r
+                global_btn_r = QRect(r.x() + r.width() - btn_w, max(0, r.y() - 25), btn_w, btn_h)
+                self.clear_btn_rects[i] = global_btn_r
 
+                local_btn_r = QRect(local_r.x() + local_r.width() - btn_w, max(0, local_r.y() - 25), btn_w, btn_h)
                 painter.fillRect(local_btn_r, QColor("#ef4444"))
                 painter.setPen(QPen(QColor("#ffffff")))
                 painter.drawText(local_btn_r, Qt.AlignCenter, "🔕 消除报警")
 
         if self.is_editing and self.drag_action == 'DRAW' and self.current_draw_rect:
+            local_draw = QRect(self.mapFromGlobal(self.current_draw_rect.topLeft()), self.current_draw_rect.size())
             painter.setCompositionMode(QPainter.CompositionMode_Clear)
-            painter.fillRect(self.current_draw_rect, Qt.transparent)
+            painter.fillRect(local_draw, Qt.transparent)
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
             painter.setPen(QPen(QColor("#38bdf8"), 2, Qt.DashLine))
-            painter.drawRect(self.current_draw_rect)
+            painter.drawRect(local_draw)
 
 
 # ==================== 6. HTTP 服务器与扫码对话框 ====================
@@ -532,7 +520,7 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V11.1 - 网页局域绑定与后台免打扰版)")
+        self.setWindowTitle("网页刷新数字监控 (V11.0 - 全局统一控制版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -686,7 +674,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.combined_panel)
 
         # 6. 🎯 数字监控面板
-        grp_roi = QGroupBox("🎯 数字监控 (网页专属框选)")
+        grp_roi = QGroupBox("🎯 数字监控 (通过屏幕右上角 ⚙️ 统一调整)")
         g_roi = QVBoxLayout()
 
         h_roi_top = QHBoxLayout()
@@ -797,7 +785,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.toggle_bar)
         main_layout.addWidget(self.webview, stretch=1)
 
-        # ---------- 定时器与局域 Overlay ----------
+        # ---------- 定时器与 Overlay ----------
         self.refresh_clock = QTimer()
         self.refresh_clock.timeout.connect(self.on_refresh_clock_tick)
         self.remaining_seconds = 0
@@ -809,12 +797,10 @@ class MainWindow(QMainWindow):
         self.roi_clock_timer.timeout.connect(self.on_roi_clock_tick)
         self.roi_remaining_seconds = 0
 
-        # ROI Overlay 绑定主窗口，并且几何尺寸严格绑定网页控件
-        self.roi_overlay = PersistentROIOverlay(self)
+        self.roi_overlay = PersistentROIOverlay()
         self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
         self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
         self.roi_overlay.rects = list(self.roi_list)
-        self.roi_overlay.show()
 
         # ---------- 系统托盘 ----------
         tray_icon = QIcon("1.ico") if os.path.exists("1.ico") else QIcon.fromTheme("face-smile")
@@ -827,35 +813,11 @@ class MainWindow(QMainWindow):
 
         self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
-        self.update_overlay_geometry()
         self.update_top_right_countdown_bar()
         
-        self.log("🚀 系统初始化完成 (V11.1 - 网页局域绑定版)")
+        self.log("🚀 系统初始化完成 (V11.0 - 全局统一控制版)")
         if self.config["url"]:
             self.load_page()
-
-    def update_overlay_geometry(self):
-        """实时将识别框覆盖层的位置与网页控件同步"""
-        if hasattr(self, 'webview') and hasattr(self, 'roi_overlay') and self.webview.isVisible():
-            global_pos = self.webview.mapToGlobal(QPoint(0, 0))
-            self.roi_overlay.setGeometry(QRect(global_pos, self.webview.size()))
-            self.roi_overlay.reposition_bars()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.update_overlay_geometry()
-
-    def moveEvent(self, event):
-        super().moveEvent(event)
-        self.update_overlay_geometry()
-
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        self.update_overlay_geometry()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        QTimer.singleShot(50, self.update_overlay_geometry)
 
     def log(self, text):
         time_str = QDateTime.currentDateTime().toString("hh:mm:ss")
@@ -926,7 +888,6 @@ class MainWindow(QMainWindow):
         is_visible = self.left_panel.isVisible()
         self.left_panel.setVisible(not is_visible)
         self.toggle_btn.setText(">" if is_visible else "<")
-        QTimer.singleShot(50, self.update_overlay_geometry)
 
     def on_zoom_changed(self, value):
         factor = value / 100.0
@@ -948,7 +909,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self.paste_credentials)
 
     def start_roi_selection(self):
-        self.log("提示：框选仅限制在网页画面区域内")
+        self.log("提示：也可点击屏幕右上角 ⚙️ 统一调整所有框选窗口")
         self.roi_overlay.start_editing(self.roi_list)
 
     def clear_all_rois(self):
@@ -1115,6 +1076,9 @@ class MainWindow(QMainWindow):
         if not self.roi_list or not HAS_DDDDOCR or self.ocr is None:
             return
 
+        screen = QGuiApplication.primaryScreen()
+        dpr = screen.devicePixelRatio()
+
         target_same_n = self.target_same_count_spin.value()
         user_target_val = self.target_value_input.text().strip()
 
@@ -1124,8 +1088,12 @@ class MainWindow(QMainWindow):
             for box_idx, rect in enumerate(self.roi_list, 1):
                 if rect.width() <= 0 or rect.height() <= 0: continue
 
-                # 【关键改进】直接通过 webview.grab 获取网页内部图像，即使被游戏或软件遮挡也能正常识别
-                pixmap = self.webview.grab(rect)
+                phys_x = int(rect.x() * dpr)
+                phys_y = int(rect.y() * dpr)
+                phys_w = int(rect.width() * dpr)
+                phys_h = int(rect.height() * dpr)
+
+                pixmap = screen.grabWindow(0, phys_x, phys_y, phys_w, phys_h)
                 if pixmap.isNull() or pixmap.width() == 0: continue
 
                 qimg = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
@@ -1370,7 +1338,6 @@ class MainWindow(QMainWindow):
             self.toggle_bar.hide()
             self.showFullScreen()
             self.is_fullscreen = True
-        QTimer.singleShot(50, self.update_overlay_geometry)
 
     def closeEvent(self, event):
         event.accept()
