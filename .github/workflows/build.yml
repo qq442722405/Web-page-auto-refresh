@@ -1,8 +1,6 @@
 name: 网页刷新数字监控
 
 on:
-  push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
