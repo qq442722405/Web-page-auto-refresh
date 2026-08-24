@@ -141,160 +141,94 @@ class CombinedCollapsiblePanel(QWidget):
 
 # ==================== 5. ROI 覆盖层与右上角控制栏 ====================
 class PersistentROIOverlay(QWidget):
+    """软件内部的识别画面。
+
+    重要：这里不再创建全屏/置顶窗口，因此不会覆盖其它软件。
+    OCR 仍然直接从真实屏幕抓取，识别框只在本软件的预览区域里显示。
+    """
     roi_list_selected = Signal(list)
     clear_alarm_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMinimumHeight(220)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMouseTracking(True)
+        self.setStyleSheet("background:#0b0f16; border:1px solid #334155; border-radius:6px;")
 
         self.rects = []
+        self.alarm_states = {}
+        self.boxes_visible = True
         self.is_editing = False
-        self.boxes_visible = True  # 是否显示识别框
-        
         self.drag_idx = None
-        self.drag_action = None 
+        self.drag_action = None
         self.drag_start_pos = None
         self.orig_rect = None
         self.current_draw_rect = None
-        
-        self.alarm_states = {}
+        self.screen_pixmap = QPixmap()
+        self.screen_geometry = QRect()
+        self.countdown_text = "刷新: -- | OCR检测: --"
         self.clear_btn_rects = {}
 
-        # 1. 顶部中间编辑工具栏
         self.bar = QWidget(self)
-        self.bar.setStyleSheet("background-color: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;")
-        bar_layout = QHBoxLayout(self.bar)
-        bar_layout.setContentsMargins(10, 5, 10, 5)
-
-        self.tip_label = QLabel("拖拽框体移动 | 拖拽四角拉伸 | 空白处划框", self.bar)
-        self.tip_label.setStyleSheet("color: #a6e3a1; font-weight: bold; font-size: 12px;")
-
-        self.btn_done = QPushButton("✅ 完成框选", self.bar)
-        self.btn_done.setStyleSheet("background-color: #10b981; color: white; font-weight: bold; padding: 3px 10px;")
+        self.bar.setStyleSheet("background:#1e1e2e; border:1px solid #45475a; border-radius:6px;")
+        bl = QHBoxLayout(self.bar)
+        bl.setContentsMargins(8,4,8,4)
+        self.tip_label = QLabel("软件内调整：拖动框体移动 | 拖四角缩放 | 空白处划框")
+        self.tip_label.setStyleSheet("color:#a6e3a1;font-weight:bold;font-size:11px;")
+        self.btn_done = QPushButton("✅ 完成")
+        self.btn_clear = QPushButton("🗑️ 清空")
+        self.btn_cancel = QPushButton("取消")
         self.btn_done.clicked.connect(self.finish_editing)
-
-        self.btn_clear = QPushButton("🗑️ 清空", self.bar)
-        self.btn_clear.setStyleSheet("background-color: #ef4444; color: white; padding: 3px 10px;")
         self.btn_clear.clicked.connect(self.clear_rects)
-
-        self.btn_cancel = QPushButton("取消", self.bar)
-        self.btn_cancel.setStyleSheet("background-color: #4b5563; color: white; padding: 3px 10px;")
         self.btn_cancel.clicked.connect(self.cancel_editing)
-
-        bar_layout.addWidget(self.tip_label)
-        bar_layout.addSpacing(10)
-        bar_layout.addWidget(self.btn_done)
-        bar_layout.addWidget(self.btn_clear)
-        bar_layout.addWidget(self.btn_cancel)
+        for b in (self.btn_done,self.btn_clear,self.btn_cancel):
+            b.setStyleSheet("background:#313244;color:#fff;border:1px solid #45475a;border-radius:4px;padding:3px 8px;")
+        bl.addWidget(self.tip_label, 1)
+        bl.addWidget(self.btn_done)
+        bl.addWidget(self.btn_clear)
+        bl.addWidget(self.btn_cancel)
         self.bar.hide()
 
-        # 2. 右上角常驻控制栏
-        self.top_right_bar = QWidget(self)
-        self.top_right_bar.setStyleSheet("""
-            QWidget {
-                background-color: #181825;
-                border: 1px solid #45475a;
-                border-radius: 6px;
-            }
-            QLabel {
-                color: #38bdf8;
-                font-weight: bold;
-                font-size: 12px;
-                padding: 0 4px;
-            }
-            QPushButton {
-                background-color: #313244;
-                color: #cdd6f4;
-                border: 1px solid #45475a;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #45475a;
-                color: #ffffff;
-            }
-        """)
-        tr_layout = QHBoxLayout(self.top_right_bar)
-        tr_layout.setContentsMargins(8, 4, 8, 4)
-        tr_layout.setSpacing(6)
+        self.info_bar = QLabel("识别画面：等待第一次 OCR 截图…")
+        self.info_bar.setStyleSheet("color:#94a3b8;background:#111827;border:1px solid #1f2937;padding:4px 7px;font-size:11px;")
+        self.info_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        self.lbl_countdown = QLabel("⏱️ 刷新: --s | 检测: --s", self.top_right_bar)
-        self.btn_toggle_vis = QPushButton("👁️ 隐藏窗口", self.top_right_bar)
-        self.btn_gear = QPushButton("⚙️ 调整窗口", self.top_right_bar)
-
-        self.btn_toggle_vis.clicked.connect(self.toggle_boxes_visibility)
-        self.btn_gear.clicked.connect(self.on_top_right_gear_clicked)
-
-        tr_layout.addWidget(self.lbl_countdown)
-        tr_layout.addWidget(self.btn_toggle_vis)
-        tr_layout.addWidget(self.btn_gear)
-
-        self.show_fullscreen_overlay()
-
-    def show_fullscreen_overlay(self):
-        screen = QGuiApplication.primaryScreen()
-        geo = screen.geometry()
-        self.setGeometry(geo)
-        self.reposition_bars()
-        self.show()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.reposition_bars()
-
-    def reposition_bars(self):
-        geo = self.geometry()
-        # 居中显示顶部编辑栏
-        self.bar.adjustSize()
-        self.bar.move((geo.width() - self.bar.width()) // 2, 20)
-
-        # 右上角显示常驻控制栏
-        self.top_right_bar.adjustSize()
-        self.top_right_bar.move(geo.width() - self.top_right_bar.width() - 20, 20)
+    def set_screen_pixmap(self, pixmap, screen_geometry=None):
+        if pixmap and not pixmap.isNull():
+            self.screen_pixmap = pixmap
+            self.screen_geometry = screen_geometry or QGuiApplication.primaryScreen().geometry()
+            self.info_bar.setText(f"识别画面：{self.screen_geometry.width()}×{self.screen_geometry.height()} | OCR 后台抓屏，不受其它软件窗口遮挡影响")
+            self.update()
 
     def update_countdown_text(self, text):
-        self.lbl_countdown.setText(text)
-        self.top_right_bar.adjustSize()
-        geo = self.geometry()
-        self.top_right_bar.move(geo.width() - self.top_right_bar.width() - 20, 20)
+        self.countdown_text = text
+        self.update()
+
+    def set_alarm_states(self, states):
+        self.alarm_states = dict(states)
+        self.update()
 
     def toggle_boxes_visibility(self):
         self.boxes_visible = not self.boxes_visible
-        if self.boxes_visible:
-            self.btn_toggle_vis.setText("👁️ 隐藏窗口")
-        else:
-            self.btn_toggle_vis.setText("👁️ 显示窗口")
         self.update()
-
-    def on_top_right_gear_clicked(self):
-        if self.is_editing:
-            self.finish_editing()
-        else:
-            self.boxes_visible = True
-            self.btn_toggle_vis.setText("👁️ 隐藏窗口")
-            self.start_editing(self.rects)
 
     def start_editing(self, existing_rects):
         self.is_editing = True
         self.rects = [QRect(r) for r in existing_rects]
+        self.drag_idx = None
+        self.drag_action = None
         self.setCursor(Qt.CrossCursor)
         self.bar.show()
-        self.reposition_bars()
-        self.update_tip()
-        
-        self.raise_()
-        self.activateWindow()
+        self.bar.adjustSize()
+        self.bar.raise_()
         self.update()
 
     def finish_editing(self):
         self.is_editing = False
         self.setCursor(Qt.ArrowCursor)
         self.bar.hide()
-        self.roi_list_selected.emit(self.rects)
+        self.roi_list_selected.emit([QRect(r) for r in self.rects])
         self.update()
 
     def cancel_editing(self):
@@ -305,82 +239,113 @@ class PersistentROIOverlay(QWidget):
 
     def clear_rects(self):
         self.rects.clear()
-        self.update_tip()
         self.update()
 
-    def update_tip(self):
-        self.tip_label.setText(f"拖拽移动/角点缩放 | 已有选框: {len(self.rects)} 个")
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.bar.isVisible():
+            self.bar.adjustSize()
+            self.bar.move(8, 8)
 
-    def set_alarm_states(self, states):
-        self.alarm_states = states
-        self.update()
+    def _content_rect(self):
+        r = self.rect().adjusted(1, 1, -1, -1)
+        if self.bar.isVisible():
+            top = self.bar.height() + 12
+            r.setTop(min(r.bottom(), top))
+        return r
+
+    def _image_target_rect(self):
+        if self.screen_pixmap.isNull():
+            return self._content_rect()
+        area = self._content_rect()
+        pw, ph = self.screen_pixmap.width(), self.screen_pixmap.height()
+        if pw <= 0 or ph <= 0:
+            return area
+        scale = min(area.width()/pw, area.height()/ph)
+        w, h = max(1, int(pw*scale)), max(1, int(ph*scale))
+        x = area.x() + (area.width()-w)//2
+        y = area.y() + (area.height()-h)//2
+        return QRect(x, y, w, h)
+
+    def _screen_to_view(self, rect):
+        target = self._image_target_rect()
+        sg = self.screen_geometry
+        if sg.width() <= 0 or sg.height() <= 0:
+            return QRect()
+        x = target.x() + int((rect.x()-sg.x()) * target.width()/sg.width())
+        y = target.y() + int((rect.y()-sg.y()) * target.height()/sg.height())
+        w = int(rect.width() * target.width()/sg.width())
+        h = int(rect.height() * target.height()/sg.height())
+        return QRect(x,y,max(1,w),max(1,h))
+
+    def _view_to_screen(self, pos):
+        target = self._image_target_rect()
+        sg = self.screen_geometry
+        if target.width() <= 0 or target.height() <= 0 or sg.width() <= 0 or sg.height() <= 0:
+            return QPoint()
+        x = sg.x() + int((pos.x()-target.x()) * sg.width()/target.width())
+        y = sg.y() + int((pos.y()-target.y()) * sg.height()/target.height())
+        return QPoint(x,y)
 
     def _get_handle_at(self, rect, pos):
-        s = 12
-        x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
-
-        if (pos - QPoint(x, y)).manhattanLength() <= s: return 'NW'
-        if (pos - QPoint(x + w, y)).manhattanLength() <= s: return 'NE'
-        if (pos - QPoint(x, y + h)).manhattanLength() <= s: return 'SW'
-        if (pos - QPoint(x + w, y + h)).manhattanLength() <= s: return 'SE'
-        if rect.contains(pos): return 'MOVE'
+        vr = self._screen_to_view(rect)
+        s = 10
+        corners = [(vr.topLeft(),'NW'),(vr.topRight(),'NE'),(vr.bottomLeft(),'SW'),(vr.bottomRight(),'SE')]
+        for p,n in corners:
+            if (pos-p).manhattanLength() <= s:
+                return n
+        if vr.contains(pos): return 'MOVE'
         return None
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            pos = event.globalPosition().toPoint()
+        if event.button() != Qt.LeftButton:
+            return
+        pos = event.position().toPoint()
 
-            # 非编辑状态下，点击消除报警按钮
-            if not self.is_editing:
-                for box_idx, btn_r in self.clear_btn_rects.items():
-                    if btn_r.contains(pos):
-                        self.clear_alarm_requested.emit(box_idx)
-                        return
-                return
-
-            if self.bar.geometry().contains(self.mapFromGlobal(pos)) or \
-               self.top_right_bar.geometry().contains(self.mapFromGlobal(pos)):
-                return
-
-            for idx in reversed(range(len(self.rects))):
-                r = self.rects[idx]
-                action = self._get_handle_at(r, pos)
-                if action:
-                    self.drag_idx = idx
-                    self.drag_action = action
-                    self.drag_start_pos = pos
-                    self.orig_rect = QRect(r)
+        # 非编辑状态：点击软件内部的“消除报警”按钮
+        if not self.is_editing:
+            for box_idx, btn_rect in self.clear_btn_rects.items():
+                if btn_rect.contains(pos):
+                    self.clear_alarm_requested.emit(box_idx)
                     return
+            return
 
-            self.drag_action = 'DRAW'
-            self.drag_start_pos = pos
-            self.current_draw_rect = QRect(pos, pos)
-            self.update()
+        if self.bar.geometry().contains(pos):
+            return
+        screen_pos = self._view_to_screen(pos)
+        target = self._image_target_rect()
+        if not target.contains(pos):
+            return
+        for idx in reversed(range(len(self.rects))):
+            action = self._get_handle_at(self.rects[idx], pos)
+            if action:
+                self.drag_idx = idx
+                self.drag_action = action
+                self.drag_start_pos = screen_pos
+                self.orig_rect = QRect(self.rects[idx])
+                return
+        self.drag_action = 'DRAW'
+        self.drag_start_pos = screen_pos
+        self.current_draw_rect = QRect(screen_pos, screen_pos)
+        self.update()
 
     def mouseMoveEvent(self, event):
         if not self.is_editing or not self.drag_action:
             return
-
-        pos = event.globalPosition().toPoint()
+        pos = self._view_to_screen(event.position().toPoint())
         delta = pos - self.drag_start_pos
-
         if self.drag_action == 'MOVE' and self.drag_idx is not None:
             self.rects[self.drag_idx] = self.orig_rect.translated(delta)
         elif self.drag_action == 'SE' and self.drag_idx is not None:
-            r = QRect(self.orig_rect.topLeft(), pos).normalized()
-            self.rects[self.drag_idx] = r
+            self.rects[self.drag_idx] = QRect(self.orig_rect.topLeft(), pos).normalized()
         elif self.drag_action == 'NW' and self.drag_idx is not None:
-            r = QRect(pos, self.orig_rect.bottomRight()).normalized()
-            self.rects[self.drag_idx] = r
+            self.rects[self.drag_idx] = QRect(pos, self.orig_rect.bottomRight()).normalized()
         elif self.drag_action == 'NE' and self.drag_idx is not None:
-            r = QRect(QPoint(self.orig_rect.left(), pos.y()), QPoint(pos.x(), self.orig_rect.bottom())).normalized()
-            self.rects[self.drag_idx] = r
+            self.rects[self.drag_idx] = QRect(QPoint(self.orig_rect.left(), pos.y()), QPoint(pos.x(), self.orig_rect.bottom())).normalized()
         elif self.drag_action == 'SW' and self.drag_idx is not None:
-            r = QRect(QPoint(pos.x(), self.orig_rect.top()), QPoint(self.orig_rect.right(), pos.y())).normalized()
-            self.rects[self.drag_idx] = r
+            self.rects[self.drag_idx] = QRect(QPoint(pos.x(), self.orig_rect.top()), QPoint(self.orig_rect.right(), pos.y())).normalized()
         elif self.drag_action == 'DRAW':
             self.current_draw_rect = QRect(self.drag_start_pos, pos).normalized()
-
         self.update()
 
     def mouseReleaseEvent(self, event):
@@ -388,8 +353,7 @@ class PersistentROIOverlay(QWidget):
             if self.drag_action == 'DRAW' and self.current_draw_rect:
                 if self.current_draw_rect.width() > 10 and self.current_draw_rect.height() > 10:
                     self.rects.append(self.current_draw_rect)
-                    self.update_tip()
-            
+                    self.tip_label.setText(f"软件内调整：当前 {len(self.rects)} 个选框")
             self.drag_action = None
             self.drag_idx = None
             self.current_draw_rect = None
@@ -397,62 +361,52 @@ class PersistentROIOverlay(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        self.clear_btn_rects.clear()
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        target = self._image_target_rect()
+        painter.fillRect(self.rect(), QColor("#0b0f16"))
+        if self.screen_pixmap.isNull():
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "等待 OCR 第一次抓屏…")
+        else:
+            painter.drawPixmap(target, self.screen_pixmap)
 
         if self.is_editing:
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
+            painter.fillRect(self.rect(), QColor(0,0,0,70))
 
-        # 若处于“隐藏窗口”状态且未在编辑，不绘制选框
-        if not self.boxes_visible and not self.is_editing:
-            return
-
-        for i, r in enumerate(self.rects, 1):
-            local_r = QRect(self.mapFromGlobal(r.topLeft()), r.size())
-            is_alarm = self.alarm_states.get(i, False)
-
-            if self.is_editing:
-                painter.setCompositionMode(QPainter.CompositionMode_Clear)
-                painter.fillRect(local_r, Qt.transparent)
-                painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-
-            border_color = QColor("#ef4444") if is_alarm else QColor("#00ff66")
-            pen_width = 3 if is_alarm else 2
-
-            painter.setPen(QPen(border_color, pen_width, Qt.SolidLine))
-            painter.drawRect(local_r)
-
-            # 编号角标
-            badge_rect = QRect(local_r.x(), max(0, local_r.y() - 22), 42, 22)
-            painter.fillRect(badge_rect, border_color)
-            painter.setPen(QPen(QColor("#000000")))
-            painter.drawText(badge_rect, Qt.AlignCenter, f"#{i}")
-
-            if self.is_editing:
-                handle_size = 8
-                painter.setPen(QPen(QColor("#38bdf8"), 2))
-                painter.setBrush(QColor("#ffffff"))
-                for corner in [local_r.topLeft(), local_r.topRight(), local_r.bottomLeft(), local_r.bottomRight()]:
-                    painter.drawRect(corner.x() - handle_size // 2, corner.y() - handle_size // 2, handle_size, handle_size)
-
-            # 报警消除按钮
-            if is_alarm:
-                btn_w, btn_h = 90, 22
-                global_btn_r = QRect(r.x() + r.width() - btn_w, max(0, r.y() - 25), btn_w, btn_h)
-                self.clear_btn_rects[i] = global_btn_r
-
-                local_btn_r = QRect(local_r.x() + local_r.width() - btn_w, max(0, local_r.y() - 25), btn_w, btn_h)
-                painter.fillRect(local_btn_r, QColor("#ef4444"))
-                painter.setPen(QPen(QColor("#ffffff")))
-                painter.drawText(local_btn_r, Qt.AlignCenter, "🔕 消除报警")
+        self.clear_btn_rects.clear()
+        if self.boxes_visible or self.is_editing:
+            for i, r in enumerate(self.rects, 1):
+                vr = self._screen_to_view(r)
+                alarm = self.alarm_states.get(i, False)
+                color = QColor("#ef4444") if alarm else QColor("#00ff66")
+                painter.setPen(QPen(color, 3 if alarm else 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(vr)
+                badge = QRect(vr.x(), max(target.y(), vr.y()-20), 42, 20)
+                painter.fillRect(badge, color)
+                painter.setPen(QColor("#000"))
+                painter.drawText(badge, Qt.AlignCenter, f"#{i}")
+                if self.is_editing:
+                    painter.setPen(QPen(QColor("#38bdf8"),2))
+                    painter.setBrush(QColor("#fff"))
+                    hs=7
+                    for c in [vr.topLeft(),vr.topRight(),vr.bottomLeft(),vr.bottomRight()]:
+                        painter.drawRect(c.x()-hs//2,c.y()-hs//2,hs,hs)
+                if alarm and not self.is_editing:
+                    br = QRect(vr.right()-82, max(target.y(),vr.y()-21), 82, 20)
+                    painter.fillRect(br,QColor("#ef4444"))
+                    painter.setPen(QColor("#fff"))
+                    painter.drawText(br,Qt.AlignCenter,"🔕 消除报警")
+                    self.clear_btn_rects[i] = br
 
         if self.is_editing and self.drag_action == 'DRAW' and self.current_draw_rect:
-            local_draw = QRect(self.mapFromGlobal(self.current_draw_rect.topLeft()), self.current_draw_rect.size())
-            painter.setCompositionMode(QPainter.CompositionMode_Clear)
-            painter.fillRect(local_draw, Qt.transparent)
-            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            vr = self._screen_to_view(self.current_draw_rect)
+            painter.setPen(QPen(QColor("#38bdf8"),2,Qt.DashLine))
+            painter.drawRect(vr)
 
-            painter.setPen(QPen(QColor("#38bdf8"), 2, Qt.DashLine))
-            painter.drawRect(local_draw)
+        # 顶部状态文字
+        painter.setPen(QColor("#38bdf8"))
+        painter.drawText(QRect(8, max(4, self.bar.height()+10), self.width()-16, 18), Qt.AlignRight, self.countdown_text)
 
 
 # ==================== 6. HTTP 服务器与扫码对话框 ====================
@@ -520,7 +474,7 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V11.0 - 全局统一控制版)")
+        self.setWindowTitle("网页刷新数字监控 (V12.0 - 软件内识别框版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -678,7 +632,7 @@ class MainWindow(QMainWindow):
         g_roi = QVBoxLayout()
 
         h_roi_top = QHBoxLayout()
-        self.select_roi_btn = QPushButton("📐 框选调整窗口")
+        self.select_roi_btn = QPushButton("📐 软件内调整识别框")
         self.select_roi_btn.clicked.connect(self.start_roi_selection)
         h_roi_top.addWidget(self.select_roi_btn)
 
@@ -773,7 +727,7 @@ class MainWindow(QMainWindow):
         self.toggle_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         toggle_layout.addWidget(self.toggle_btn)
 
-        # ---------- 右侧：浏览器 ----------
+        # ---------- 右侧：浏览器 + 软件内部识别画面 ----------
         self.webview = QWebEngineView()
         self.custom_page = CustomWebPage(self.webview)
         self.webview.setPage(self.custom_page)
@@ -781,9 +735,21 @@ class MainWindow(QMainWindow):
         self.setup_user_script()
         self.webview.loadFinished.connect(self.on_load_finished)
 
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(4,4,4,4)
+        right_layout.setSpacing(4)
+        self.preview_title = QLabel("🖥️ 软件内识别画面（后台 OCR 抓取真实屏幕）")
+        self.preview_title.setStyleSheet("color:#38bdf8;font-weight:bold;background:#111827;padding:5px;border:1px solid #1f2937;")
+        right_layout.addWidget(self.preview_title)
+        self.roi_overlay = PersistentROIOverlay(right_panel)
+        right_layout.addWidget(self.roi_overlay, 3)
+        self.webview_container = self.webview
+        right_layout.addWidget(self.webview_container, 7)
+
         main_layout.addWidget(self.left_panel)
         main_layout.addWidget(self.toggle_bar)
-        main_layout.addWidget(self.webview, stretch=1)
+        main_layout.addWidget(right_panel, stretch=1)
 
         # ---------- 定时器与 Overlay ----------
         self.refresh_clock = QTimer()
@@ -796,11 +762,6 @@ class MainWindow(QMainWindow):
         self.roi_clock_timer = QTimer()
         self.roi_clock_timer.timeout.connect(self.on_roi_clock_tick)
         self.roi_remaining_seconds = 0
-
-        self.roi_overlay = PersistentROIOverlay()
-        self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
-        self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
-        self.roi_overlay.rects = list(self.roi_list)
 
         # ---------- 系统托盘 ----------
         tray_icon = QIcon("1.ico") if os.path.exists("1.ico") else QIcon.fromTheme("face-smile")
@@ -815,7 +776,7 @@ class MainWindow(QMainWindow):
         self.refresh_ip_list()
         self.update_top_right_countdown_bar()
         
-        self.log("🚀 系统初始化完成 (V11.0 - 全局统一控制版)")
+        self.log("🚀 系统初始化完成 (V12.0 - 软件内识别框版)")
         if self.config["url"]:
             self.load_page()
 
@@ -909,7 +870,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self.paste_credentials)
 
     def start_roi_selection(self):
-        self.log("提示：也可点击屏幕右上角 ⚙️ 统一调整所有框选窗口")
+        self.log("📐 已进入软件内部识别画面框选模式，不会覆盖其它软件")
         self.roi_overlay.start_editing(self.roi_list)
 
     def clear_all_rois(self):
@@ -1078,6 +1039,11 @@ class MainWindow(QMainWindow):
 
         screen = QGuiApplication.primaryScreen()
         dpr = screen.devicePixelRatio()
+        screen_geo = screen.geometry()
+        # 一次抓取完整真实屏幕：后台 OCR 不依赖识别框窗口，也不要求监控软件在前台。
+        full_pixmap = screen.grabWindow(0)
+        if not full_pixmap.isNull():
+            self.roi_overlay.set_screen_pixmap(full_pixmap, screen_geo)
 
         target_same_n = self.target_same_count_spin.value()
         user_target_val = self.target_value_input.text().strip()
@@ -1093,7 +1059,13 @@ class MainWindow(QMainWindow):
                 phys_w = int(rect.width() * dpr)
                 phys_h = int(rect.height() * dpr)
 
-                pixmap = screen.grabWindow(0, phys_x, phys_y, phys_w, phys_h)
+                if full_pixmap.isNull() or full_pixmap.width() == 0: continue
+                # 从本次完整屏幕截图中裁剪 ROI，避免每个区域重复抓屏。
+                crop_x = int((rect.x() - screen_geo.x()) * dpr)
+                crop_y = int((rect.y() - screen_geo.y()) * dpr)
+                crop_w = int(rect.width() * dpr)
+                crop_h = int(rect.height() * dpr)
+                pixmap = full_pixmap.copy(crop_x, crop_y, crop_w, crop_h)
                 if pixmap.isNull() or pixmap.width() == 0: continue
 
                 qimg = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
