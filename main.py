@@ -157,6 +157,9 @@ class PersistentROIOverlay(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.rects = []
         self.is_editing = False
+        # 非编辑状态下，Overlay 本身不拦截网页鼠标事件，保证网页可以正常点击、滚动、输入。
+        # 右上角按钮等子控件仍可正常接收点击。
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.boxes_visible = True
         self.alarm_states = {}
         self.drag_idx = None
@@ -235,6 +238,8 @@ class PersistentROIOverlay(QWidget):
             self.start_editing(self.rects)
 
     def start_editing(self, existing_rects):
+        # 编辑识别框时才接管鼠标；平时网页完全不受 Overlay 影响。
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.is_editing=True
         self.rects=[QRect(r) for r in existing_rects]
         self.drag_idx=None; self.drag_action=None; self.current_draw_rect=None
@@ -245,6 +250,7 @@ class PersistentROIOverlay(QWidget):
 
     def finish_editing(self):
         self.is_editing=False
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setCursor(Qt.ArrowCursor)
         self.bar.hide()
         self.roi_list_selected.emit([QRect(r) for r in self.rects])
@@ -252,6 +258,7 @@ class PersistentROIOverlay(QWidget):
 
     def cancel_editing(self):
         self.is_editing=False
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setCursor(Qt.ArrowCursor)
         self.bar.hide()
         self.update()
