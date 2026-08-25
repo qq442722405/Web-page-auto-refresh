@@ -204,7 +204,7 @@ class PersistentROIOverlay(QWidget):
         self.btn_toggle_vis.clicked.connect(self.toggle_boxes_visibility)
         self.btn_gear.clicked.connect(self.on_top_right_gear_clicked)
         tr.addWidget(self.lbl_countdown); tr.addWidget(self.btn_toggle_vis); tr.addWidget(self.btn_gear)
-        self.top_right_bar.show()
+        self.top_right_bar.hide()  # 控制按钮改由主窗口真实控件承载，避免透明 Overlay 拦截/吞掉点击
         self.raise_()
         self.reposition_bars()
 
@@ -221,12 +221,26 @@ class PersistentROIOverlay(QWidget):
     def update_countdown_text(self, text):
         self.countdown_text=text
         self.lbl_countdown.setText(text)
+        # 主窗口右上角使用真实按钮，确保可以点击
+        try:
+            if hasattr(self.parent(), "web_control_countdown"):
+                self.parent().web_control_countdown.setText(text)
+                self.parent().web_control_bar.adjustSize()
+                self.parent().position_web_control_bar()
+        except Exception:
+            pass
         self.top_right_bar.adjustSize()
         self.reposition_bars()
 
     def toggle_boxes_visibility(self):
         self.boxes_visible=not self.boxes_visible
-        self.btn_toggle_vis.setText("👁️ 隐藏识别框" if self.boxes_visible else "👁️ 显示识别框")
+        txt = "👁️ 隐藏识别框" if self.boxes_visible else "👁️ 显示识别框"
+        self.btn_toggle_vis.setText(txt)
+        try:
+            if hasattr(self.parent(), "web_control_toggle"):
+                self.parent().web_control_toggle.setText(txt)
+        except Exception:
+            pass
         self.update()
 
     def on_top_right_gear_clicked(self):
@@ -691,6 +705,33 @@ class MainWindow(QMainWindow):
         self.setup_user_script()
         self.webview.loadFinished.connect(self.on_load_finished)
 
+        # ---------- 网页右上角真实控制栏 ----------
+        # 不能把可点击按钮放在 WA_TransparentForMouseEvents 的 Overlay 子控件里，
+        # 否则按钮也会一起收不到鼠标事件。这里使用 MainWindow 的真实 QPushButton。
+        self.web_control_bar = QWidget(self)
+        self.web_control_bar.setStyleSheet("""
+            QWidget { background:#181825; border:1px solid #45475a; border-radius:6px; }
+            QLabel { color:#38bdf8; font-weight:bold; font-size:11px; padding:0 3px; }
+            QPushButton { background:#313244; color:#cdd6f4; border:1px solid #45475a;
+                          border-radius:4px; padding:5px 9px; font-size:11px; font-weight:bold; }
+            QPushButton:hover { background:#45475a; color:#fff; }
+        """)
+        wcl = QHBoxLayout(self.web_control_bar)
+        wcl.setContentsMargins(7,4,7,4); wcl.setSpacing(5)
+        self.web_control_countdown = QLabel("⏱️ 刷新: -- | OCR检测: --")
+        self.web_control_toggle = QPushButton("👁️ 隐藏识别框")
+        self.web_control_clear = QPushButton("🔕 消除报警")
+        self.web_control_gear = QPushButton("⚙️ 调整识别框")
+        self.web_control_toggle.clicked.connect(self.roi_overlay.toggle_boxes_visibility)
+        self.web_control_clear.clicked.connect(self.clear_all_alarms)
+        self.web_control_gear.clicked.connect(self.roi_overlay.on_top_right_gear_clicked)
+        wcl.addWidget(self.web_control_countdown)
+        wcl.addWidget(self.web_control_toggle)
+        wcl.addWidget(self.web_control_clear)
+        wcl.addWidget(self.web_control_gear)
+        self.web_control_bar.adjustSize()
+        self.web_control_bar.raise_()
+
         main_layout.addWidget(self.left_panel)
         main_layout.addWidget(self.toggle_bar)
         main_layout.addWidget(self.webview, stretch=1)
@@ -714,6 +755,7 @@ class MainWindow(QMainWindow):
         self.roi_overlay.setGeometry(self.webview.rect())
         self.roi_overlay.raise_()
         self.webview.installEventFilter(self)
+        self.position_web_control_bar()
 
         # ---------- 系统托盘 ----------
         tray_icon = QIcon("1.ico") if os.path.exists("1.ico") else QIcon.fromTheme("face-smile")
@@ -731,6 +773,17 @@ class MainWindow(QMainWindow):
         self.log("🚀 系统初始化完成 (V11.0 - 全局统一控制版)")
         if self.config["url"]:
             self.load_page()
+
+    def position_web_control_bar(self):
+        if not hasattr(self, "web_control_bar") or not hasattr(self, "webview"):
+            return
+        # 右上角位于网页区域内，但控件属于主窗口，不会被 Overlay 的鼠标透明策略影响。
+        top_left = self.webview.mapTo(self, QPoint(0, 0))
+        self.web_control_bar.adjustSize()
+        x = top_left.x() + self.webview.width() - self.web_control_bar.width() - 10
+        y = top_left.y() + 10
+        self.web_control_bar.move(max(top_left.x()+5, x), max(5, y))
+        self.web_control_bar.raise_()
 
     def eventFilter(self, obj, event):
         if hasattr(self, "webview") and obj is self.webview:
@@ -750,6 +803,8 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "roi_overlay") and self.roi_overlay:
                     self.roi_overlay.setGeometry(self.webview.rect())
                     self.roi_overlay.raise_()
+                    if hasattr(self, "web_control_bar"):
+                        self.position_web_control_bar()
 
         return super().eventFilter(obj, event)
 
