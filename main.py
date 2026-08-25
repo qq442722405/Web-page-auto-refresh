@@ -139,6 +139,54 @@ class CombinedCollapsiblePanel(QWidget):
             self.toggle_btn.setText("▲ 基础配置与设置 (点击收起面板)")
 
 
+# ==================== 5. 独立最上层报警按钮 ====================
+class FloatingAlarmButton(QPushButton):
+    """独立于网页/识别框的最上层报警按钮，始终可点击。"""
+    def __init__(self, owner):
+        super().__init__("🔕  消除报警", None)
+        self.owner = owner
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(38)
+        self.setStyleSheet("""
+            QPushButton { background:#dc2626; color:#ffffff; border:2px solid #fecaca;
+                          border-radius:9px; padding:6px 16px; font-size:13px; font-weight:bold; }
+            QPushButton:hover { background:#ef4444; }
+            QPushButton:pressed { background:#b91c1c; }
+        """)
+        self.clicked.connect(self._clear)
+        self.hide()
+
+    def _clear(self):
+        try:
+            self.owner.clear_all_alarms()
+        finally:
+            self.hide()
+
+    def update_position(self):
+        if not self.owner or not hasattr(self.owner, "roi_list"):
+            return
+        alarming = [i for i, v in getattr(self.owner, "box_is_alarming", {}).items() if v]
+        if not alarming:
+            return
+        idx = alarming[0] - 1
+        if idx < 0 or idx >= len(self.owner.roi_list):
+            return
+        r = self.owner.roi_list[idx]
+        self.adjustSize()
+        screen = QGuiApplication.primaryScreen()
+        if not screen:
+            return
+        sg = screen.availableGeometry()
+        x = r.right() - self.width()
+        y = r.top() - self.height() - 8
+        x = max(sg.left() + 5, min(x, sg.right() - self.width() - 5))
+        y = max(sg.top() + 5, y)
+        self.move(x, y)
+        self.raise_()
+
+
 # ==================== 5. ROI 覆盖层与右上角控制栏 ====================
 class PersistentROIOverlay(QWidget):
     """网页内识别框 Overlay。
@@ -285,6 +333,19 @@ class PersistentROIOverlay(QWidget):
     def set_alarm_states(self, states):
         self.alarm_states=dict(states)
         self.update()
+        try:
+            owner = self.parentWidget().window() if self.parentWidget() else None
+            # webview 是 overlay 的父级，window() 才是 MainWindow。
+            if hasattr(owner, "floating_alarm_button"):
+                alarming = any(bool(v) for v in self.alarm_states.values())
+                if alarming:
+                    owner.floating_alarm_button.update_position()
+                    owner.floating_alarm_button.show()
+                    owner.floating_alarm_button.raise_()
+                else:
+                    owner.floating_alarm_button.hide()
+        except Exception:
+            pass
 
     def _screen_to_local(self, rect):
         if not self.parentWidget(): return QRect()
@@ -740,11 +801,18 @@ class MainWindow(QMainWindow):
         wcl.addWidget(self.web_control_clear)
         wcl.addWidget(self.web_control_gear)
         self.web_control_bar.adjustSize()
+        self.web_control_bar.show()
         self.web_control_bar.raise_()
+
+        # 独立最上层报警按钮：不属于网页、不属于识别框，保证始终可以点击。
+        self.floating_alarm_button = FloatingAlarmButton(self)
 
         main_layout.addWidget(self.left_panel)
         main_layout.addWidget(self.toggle_bar)
         main_layout.addWidget(self.webview, stretch=1)
+        self.position_web_control_bar()
+        self.web_control_bar.show()
+        self.web_control_bar.raise_()
 
         # ---------- 定时器与 Overlay ----------
         self.refresh_clock = QTimer()
@@ -777,6 +845,16 @@ class MainWindow(QMainWindow):
         self.log("🚀 系统初始化完成 (V11.0 - 全局统一控制版)")
         if self.config["url"]:
             self.load_page()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "web_control_bar"):
+            self.position_web_control_bar()
+        if hasattr(self, "roi_overlay") and hasattr(self, "webview"):
+            self.roi_overlay.setGeometry(self.webview.rect())
+            self.roi_overlay.raise_()
+        if hasattr(self, "floating_alarm_button") and self.floating_alarm_button.isVisible():
+            self.floating_alarm_button.update_position()
 
     def position_web_control_bar(self):
         if not hasattr(self, "web_control_bar") or not hasattr(self, "webview"):
@@ -997,6 +1075,12 @@ class MainWindow(QMainWindow):
         text = f"⏱️ 刷新: {refresh_str} | OCR检测: {roi_str}"
         if hasattr(self, 'roi_overlay') and self.roi_overlay:
             self.roi_overlay.update_countdown_text(text)
+        if hasattr(self, 'web_control_countdown'):
+            self.web_control_countdown.setText(text)
+            self.web_control_bar.adjustSize()
+            self.position_web_control_bar()
+            self.web_control_bar.show()
+            self.web_control_bar.raise_()
 
     def segment_rows(self, img_bgr):
         h_img, w_img = img_bgr.shape[:2]
@@ -1193,6 +1277,8 @@ class MainWindow(QMainWindow):
     def clear_all_alarms(self):
         for box_idx in range(1, len(self.roi_list) + 1):
             self.clear_alarm_for_box(box_idx)
+        if hasattr(self, "floating_alarm_button"):
+            self.floating_alarm_button.hide()
 
     def stop_alarm_audio(self):
         if self.alarm_loop_timer.isActive():
@@ -1340,6 +1426,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'refresh_clock'): self.refresh_clock.stop()
         if hasattr(self, 'roi_clock_timer'): self.roi_clock_timer.stop()
         if hasattr(self, 'alarm_loop_timer'): self.alarm_loop_timer.stop()
+        if hasattr(self, 'floating_alarm_button'): self.floating_alarm_button.close()
         self.tray.hide()
         QApplication.quit()
         try:
