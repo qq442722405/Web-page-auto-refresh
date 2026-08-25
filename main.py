@@ -705,6 +705,16 @@ class MainWindow(QMainWindow):
         self.setup_user_script()
         self.webview.loadFinished.connect(self.on_load_finished)
 
+        # ---------- 网页内识别框 Overlay ----------
+        # 必须先创建 Overlay，再创建右上角控制按钮，因为控制按钮的
+        # 信号会立即引用 self.roi_overlay。
+        self.roi_overlay = PersistentROIOverlay(self.webview)
+        self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
+        self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
+        self.roi_overlay.rects = list(self.roi_list)
+        self.roi_overlay.setGeometry(self.webview.rect())
+        self.roi_overlay.raise_()
+
         # ---------- 网页右上角真实控制栏 ----------
         # 不能把可点击按钮放在 WA_TransparentForMouseEvents 的 Overlay 子控件里，
         # 否则按钮也会一起收不到鼠标事件。这里使用 MainWindow 的真实 QPushButton。
@@ -748,12 +758,6 @@ class MainWindow(QMainWindow):
         self.roi_clock_timer.timeout.connect(self.on_roi_clock_tick)
         self.roi_remaining_seconds = 0
 
-        self.roi_overlay = PersistentROIOverlay(self.webview)
-        self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
-        self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
-        self.roi_overlay.rects = list(self.roi_list)
-        self.roi_overlay.setGeometry(self.webview.rect())
-        self.roi_overlay.raise_()
         self.webview.installEventFilter(self)
         self.position_web_control_bar()
 
