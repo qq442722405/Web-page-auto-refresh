@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V11.0 - 全局统一控制与右上角控制栏版)
+网页刷新数字监控 (V14.0 - 浮层菜单与账号设置版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
@@ -19,6 +19,7 @@ import glob
 import subprocess
 import threading
 import urllib.parse
+import gc
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import numpy as np
@@ -64,7 +65,8 @@ def load_config():
         "roi_list": [[100, 100, 300, 200]],
         "roi_multiplier": 1,
         "target_same_count": 3,
-        "target_value": ""
+        "target_value": "",
+        "auto_memory_cleanup": False
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -139,54 +141,6 @@ class CombinedCollapsiblePanel(QWidget):
             self.toggle_btn.setText("▲ 基础配置与设置 (点击收起面板)")
 
 
-# ==================== 5. 独立最上层报警按钮 ====================
-class FloatingAlarmButton(QPushButton):
-    """独立于网页/识别框的最上层报警按钮，始终可点击。"""
-    def __init__(self, owner):
-        super().__init__("🔕  消除报警", None)
-        self.owner = owner
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(38)
-        self.setStyleSheet("""
-            QPushButton { background:#dc2626; color:#ffffff; border:2px solid #fecaca;
-                          border-radius:9px; padding:6px 16px; font-size:13px; font-weight:bold; }
-            QPushButton:hover { background:#ef4444; }
-            QPushButton:pressed { background:#b91c1c; }
-        """)
-        self.clicked.connect(self._clear)
-        self.hide()
-
-    def _clear(self):
-        try:
-            self.owner.clear_all_alarms()
-        finally:
-            self.hide()
-
-    def update_position(self):
-        if not self.owner or not hasattr(self.owner, "roi_list"):
-            return
-        alarming = [i for i, v in getattr(self.owner, "box_is_alarming", {}).items() if v]
-        if not alarming:
-            return
-        idx = alarming[0] - 1
-        if idx < 0 or idx >= len(self.owner.roi_list):
-            return
-        r = self.owner.roi_list[idx]
-        self.adjustSize()
-        screen = QGuiApplication.primaryScreen()
-        if not screen:
-            return
-        sg = screen.availableGeometry()
-        x = r.right() - self.width()
-        y = r.top() - self.height() - 8
-        x = max(sg.left() + 5, min(x, sg.right() - self.width() - 5))
-        y = max(sg.top() + 5, y)
-        self.move(x, y)
-        self.raise_()
-
-
 # ==================== 5. ROI 覆盖层与右上角控制栏 ====================
 class PersistentROIOverlay(QWidget):
     """网页内识别框 Overlay。
@@ -215,7 +169,7 @@ class PersistentROIOverlay(QWidget):
         self.drag_start_screen = None
         self.orig_rect = None
         self.current_draw_rect = None
-        self.clear_btn_rects = {}
+        self.alarm_buttons = {}
         self.countdown_text = "⏱️ 刷新: -- | OCR检测: --"
 
         self.bar = QWidget(self)
@@ -252,7 +206,7 @@ class PersistentROIOverlay(QWidget):
         self.btn_toggle_vis.clicked.connect(self.toggle_boxes_visibility)
         self.btn_gear.clicked.connect(self.on_top_right_gear_clicked)
         tr.addWidget(self.lbl_countdown); tr.addWidget(self.btn_toggle_vis); tr.addWidget(self.btn_gear)
-        self.top_right_bar.hide()  # 控制按钮改由主窗口真实控件承载，避免透明 Overlay 拦截/吞掉点击
+        self.top_right_bar.show()
         self.raise_()
         self.reposition_bars()
 
@@ -269,26 +223,12 @@ class PersistentROIOverlay(QWidget):
     def update_countdown_text(self, text):
         self.countdown_text=text
         self.lbl_countdown.setText(text)
-        # 主窗口右上角使用真实按钮，确保可以点击
-        try:
-            if hasattr(self.parent(), "web_control_countdown"):
-                self.parent().web_control_countdown.setText(text)
-                self.parent().web_control_bar.adjustSize()
-                self.parent().position_web_control_bar()
-        except Exception:
-            pass
         self.top_right_bar.adjustSize()
         self.reposition_bars()
 
     def toggle_boxes_visibility(self):
         self.boxes_visible=not self.boxes_visible
-        txt = "👁️ 隐藏识别框" if self.boxes_visible else "👁️ 显示识别框"
-        self.btn_toggle_vis.setText(txt)
-        try:
-            if hasattr(self.parent(), "web_control_toggle"):
-                self.parent().web_control_toggle.setText(txt)
-        except Exception:
-            pass
+        self.btn_toggle_vis.setText("👁️ 隐藏识别框" if self.boxes_visible else "👁️ 显示识别框")
         self.update()
 
     def on_top_right_gear_clicked(self):
@@ -332,20 +272,8 @@ class PersistentROIOverlay(QWidget):
 
     def set_alarm_states(self, states):
         self.alarm_states=dict(states)
+        self.update_alarm_buttons()
         self.update()
-        try:
-            owner = self.parentWidget().window() if self.parentWidget() else None
-            # webview 是 overlay 的父级，window() 才是 MainWindow。
-            if hasattr(owner, "floating_alarm_button"):
-                alarming = any(bool(v) for v in self.alarm_states.values())
-                if alarming:
-                    owner.floating_alarm_button.update_position()
-                    owner.floating_alarm_button.show()
-                    owner.floating_alarm_button.raise_()
-                else:
-                    owner.floating_alarm_button.hide()
-        except Exception:
-            pass
 
     def _screen_to_local(self, rect):
         if not self.parentWidget(): return QRect()
@@ -367,9 +295,6 @@ class PersistentROIOverlay(QWidget):
         if event.button()!=Qt.LeftButton: return
         pos=event.position().toPoint()
         if not self.is_editing:
-            for idx,br in self.clear_btn_rects.items():
-                if br.contains(pos):
-                    self.clear_alarm_requested.emit(idx); return
             return
         if self.bar.geometry().contains(pos) or self.top_right_bar.geometry().contains(pos): return
         screen_pos=self._local_to_screen(pos)
@@ -405,9 +330,36 @@ class PersistentROIOverlay(QWidget):
             self.tip_label.setText(f"网页内调整：拖动/缩放 | 当前 {len(self.rects)} 个选框")
             self.update()
 
+    def update_alarm_buttons(self):
+        active = set()
+        for i, r in enumerate(self.rects, 1):
+            if not self.alarm_states.get(i, False) or not self.boxes_visible:
+                continue
+            active.add(i)
+            local_r = self._screen_to_local(r)
+            if local_r.isEmpty():
+                continue
+            btn = self.alarm_buttons.get(i)
+            if btn is None:
+                btn = QPushButton("🔕 消除报警", self.parentWidget())
+                btn.setFixedSize(92, 26)
+                btn.setStyleSheet("QPushButton{background:#ef4444;color:white;border:1px solid #fecaca;border-radius:5px;font-size:11px;font-weight:bold;padding:2px 5px;} QPushButton:hover{background:#dc2626;}")
+                btn.clicked.connect(lambda checked=False, idx=i: self.clear_alarm_requested.emit(idx))
+                self.alarm_buttons[i] = btn
+            x = max(2, local_r.right() - btn.width())
+            y = max(2, local_r.top() - btn.height() - 4)
+            btn.move(x, y)
+            btn.show()
+            btn.raise_()
+        for i, btn in list(self.alarm_buttons.items()):
+            if i not in active:
+                btn.hide()
+        self.top_right_bar.raise_()
+        if self.is_editing:
+            self.bar.raise_()
+
     def paintEvent(self,event):
         painter=QPainter(self)
-        self.clear_btn_rects.clear()
         if not self.boxes_visible and not self.is_editing:
             # 控制栏仍保留在网页右上角，只有识别框被隐藏
             return
@@ -428,13 +380,6 @@ class PersistentROIOverlay(QWidget):
                 painter.setPen(QPen(QColor("#38bdf8"),2)); painter.setBrush(QColor("#ffffff"))
                 for c in [local_r.topLeft(),local_r.topRight(),local_r.bottomLeft(),local_r.bottomRight()]:
                     painter.drawRect(c.x()-hs//2,c.y()-hs//2,hs,hs)
-            if alarm:
-                bw,bh=90,22
-                local_btn=QRect(local_r.right()-bw,max(0,local_r.top()-25),bw,bh)
-                self.clear_btn_rects[i]=local_btn
-                painter.fillRect(local_btn,QColor("#ef4444"))
-                painter.setPen(QPen(QColor("#ffffff")))
-                painter.drawText(local_btn,Qt.AlignCenter,"🔕 消除报警")
         if self.is_editing and self.drag_action=='DRAW' and self.current_draw_rect:
             local_draw=self._screen_to_local(self.current_draw_rect)
             painter.setPen(QPen(QColor("#38bdf8"),2,Qt.DashLine)); painter.setBrush(Qt.NoBrush); painter.drawRect(local_draw)
@@ -505,7 +450,7 @@ class CustomWebPage(QWebEnginePage):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V11.0 - 全局统一控制版)")
+        self.setWindowTitle("网页刷新数字监控 (V14.0 - 浮层菜单与账号设置版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -589,6 +534,11 @@ class MainWindow(QMainWindow):
         self.auto_refresh_cb.stateChanged.connect(self.on_auto_refresh_changed)
         h_opts.addWidget(self.auto_refresh_cb)
 
+        self.memory_cleanup_cb = QCheckBox("每小时自动清理内存")
+        self.memory_cleanup_cb.setChecked(self.config.get("auto_memory_cleanup", False))
+        self.memory_cleanup_cb.stateChanged.connect(self.on_memory_cleanup_changed)
+        h_opts.addWidget(self.memory_cleanup_cb)
+
         g_url.addLayout(h_opts)
 
         self.countdown_label = QLabel("")
@@ -602,18 +552,17 @@ class MainWindow(QMainWindow):
         g_auth = QVBoxLayout(grp_auth)
         
         h_creds = QHBoxLayout()
-        self.account_input = QLineEdit(self.config["account"])
-        self.account_input.setPlaceholderText("账号")
-        self.password_input = QLineEdit(self.config["password"])
-        self.password_input.setPlaceholderText("密码")
-        h_creds.addWidget(self.account_input)
-        h_creds.addWidget(self.password_input)
-        g_auth.addLayout(h_creds)
+        self.account_btn = QPushButton("👤 账号")
+        self.account_btn.setToolTip("设置账号和密码")
+        self.account_btn.clicked.connect(self.open_account_dialog)
+        h_creds.addWidget(self.account_btn, 1)
 
         self.paste_btn = QPushButton("📋 一键粘贴 (自动按下回车)")
         self.paste_btn.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold; padding: 5px;")
         self.paste_btn.clicked.connect(self.paste_credentials)
-        g_auth.addWidget(self.paste_btn)
+        h_creds.addWidget(self.paste_btn, 2)
+        g_auth.addLayout(h_creds)
+        self.account_btn.setText("👤 账号 ✓" if self.config.get("account") and self.config.get("password") else "👤 账号")
 
         self.combined_panel.container_layout.addWidget(grp_auth)
 
@@ -766,53 +715,16 @@ class MainWindow(QMainWindow):
         self.setup_user_script()
         self.webview.loadFinished.connect(self.on_load_finished)
 
-        # ---------- 网页内识别框 Overlay ----------
-        # 必须先创建 Overlay，再创建右上角控制按钮，因为控制按钮的
-        # 信号会立即引用 self.roi_overlay。
-        self.roi_overlay = PersistentROIOverlay(self.webview)
-        self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
-        self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
-        self.roi_overlay.rects = list(self.roi_list)
-        self.roi_overlay.setGeometry(self.webview.rect())
-        self.roi_overlay.raise_()
-
-        # ---------- 网页右上角真实控制栏 ----------
-        # 不能把可点击按钮放在 WA_TransparentForMouseEvents 的 Overlay 子控件里，
-        # 否则按钮也会一起收不到鼠标事件。这里使用 MainWindow 的真实 QPushButton。
-        self.web_control_bar = QWidget(self)
-        self.web_control_bar.setStyleSheet("""
-            QWidget { background:#181825; border:1px solid #45475a; border-radius:6px; }
-            QLabel { color:#38bdf8; font-weight:bold; font-size:11px; padding:0 3px; }
-            QPushButton { background:#313244; color:#cdd6f4; border:1px solid #45475a;
-                          border-radius:4px; padding:5px 9px; font-size:11px; font-weight:bold; }
-            QPushButton:hover { background:#45475a; color:#fff; }
-        """)
-        wcl = QHBoxLayout(self.web_control_bar)
-        wcl.setContentsMargins(7,4,7,4); wcl.setSpacing(5)
-        self.web_control_countdown = QLabel("⏱️ 刷新: -- | OCR检测: --")
-        self.web_control_toggle = QPushButton("👁️ 隐藏识别框")
-        self.web_control_clear = QPushButton("🔕 消除报警")
-        self.web_control_gear = QPushButton("⚙️ 调整识别框")
-        self.web_control_toggle.clicked.connect(self.roi_overlay.toggle_boxes_visibility)
-        self.web_control_clear.clicked.connect(self.clear_all_alarms)
-        self.web_control_gear.clicked.connect(self.roi_overlay.on_top_right_gear_clicked)
-        wcl.addWidget(self.web_control_countdown)
-        wcl.addWidget(self.web_control_toggle)
-        wcl.addWidget(self.web_control_clear)
-        wcl.addWidget(self.web_control_gear)
-        self.web_control_bar.adjustSize()
-        self.web_control_bar.show()
-        self.web_control_bar.raise_()
-
-        # 独立最上层报警按钮：不属于网页、不属于识别框，保证始终可以点击。
-        self.floating_alarm_button = FloatingAlarmButton(self)
-
-        main_layout.addWidget(self.left_panel)
-        main_layout.addWidget(self.toggle_bar)
+        # 网页始终占满整个窗口；左侧菜单作为浮层覆盖在网页上，不再压缩网页显示区域。
         main_layout.addWidget(self.webview, stretch=1)
-        self.position_web_control_bar()
-        self.web_control_bar.show()
-        self.web_control_bar.raise_()
+        self.left_panel.setParent(central)
+        self.toggle_bar.setParent(central)
+        self.left_panel.raise_()
+        self.toggle_bar.raise_()
+        self.left_panel.move(0, 0)
+        self.toggle_bar.move(self.left_panel.width(), 0)
+        self.left_panel.show()
+        self.toggle_bar.show()
 
         # ---------- 定时器与 Overlay ----------
         self.refresh_clock = QTimer()
@@ -826,8 +738,19 @@ class MainWindow(QMainWindow):
         self.roi_clock_timer.timeout.connect(self.on_roi_clock_tick)
         self.roi_remaining_seconds = 0
 
+        self.memory_cleanup_timer = QTimer(self)
+        self.memory_cleanup_timer.setInterval(3600000)
+        self.memory_cleanup_timer.timeout.connect(self.cleanup_memory)
+        if self.config.get("auto_memory_cleanup", False):
+            self.memory_cleanup_timer.start()
+
+        self.roi_overlay = PersistentROIOverlay(self.webview)
+        self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
+        self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
+        self.roi_overlay.rects = list(self.roi_list)
+        self.roi_overlay.setGeometry(self.webview.rect())
+        self.roi_overlay.raise_()
         self.webview.installEventFilter(self)
-        self.position_web_control_bar()
 
         # ---------- 系统托盘 ----------
         tray_icon = QIcon("1.ico") if os.path.exists("1.ico") else QIcon.fromTheme("face-smile")
@@ -842,51 +765,28 @@ class MainWindow(QMainWindow):
         self.refresh_ip_list()
         self.update_top_right_countdown_bar()
         
-        self.log("🚀 系统初始化完成 (V11.0 - 全局统一控制版)")
+        self.log("🚀 系统初始化完成 (V14.0 - 浮层菜单与账号设置版)")
         if self.config["url"]:
             self.load_page()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "web_control_bar"):
-            self.position_web_control_bar()
-        if hasattr(self, "roi_overlay") and hasattr(self, "webview"):
+        if hasattr(self, "left_panel") and hasattr(self, "centralWidget"):
+            h = self.centralWidget().height()
+            self.left_panel.setGeometry(0, 0, 350, h) if self.left_panel.isVisible() else self.left_panel.setGeometry(0, 0, 0, h)
+            x = 350 if self.left_panel.isVisible() else 0
+            self.toggle_bar.setGeometry(x, 0, 14, h)
+        if hasattr(self, "roi_overlay"):
             self.roi_overlay.setGeometry(self.webview.rect())
             self.roi_overlay.raise_()
-        if hasattr(self, "floating_alarm_button") and self.floating_alarm_button.isVisible():
-            self.floating_alarm_button.update_position()
-
-    def position_web_control_bar(self):
-        if not hasattr(self, "web_control_bar") or not hasattr(self, "webview"):
-            return
-        # 右上角位于网页区域内，但控件属于主窗口，不会被 Overlay 的鼠标透明策略影响。
-        top_left = self.webview.mapTo(self, QPoint(0, 0))
-        self.web_control_bar.adjustSize()
-        x = top_left.x() + self.webview.width() - self.web_control_bar.width() - 10
-        y = top_left.y() + 10
-        self.web_control_bar.move(max(top_left.x()+5, x), max(5, y))
-        self.web_control_bar.raise_()
+            self.update_alarm_buttons()
 
     def eventFilter(self, obj, event):
         if hasattr(self, "webview") and obj is self.webview:
-            # 正常状态下 Overlay 对网页鼠标事件完全透明。
-            # “消除报警”是画在 Overlay 上的自绘按钮，没有真实 QPushButton，
-            # 因此这里从 QWebEngineView 的鼠标事件中反向命中按钮，避免遮挡网页操作。
-            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-                if hasattr(self, "roi_overlay") and self.roi_overlay and not self.roi_overlay.is_editing:
-                    pos = event.position().toPoint()
-                    # Overlay 与 webview 同尺寸、同左上角，因此坐标可直接使用。
-                    for idx, rect in list(self.roi_overlay.clear_btn_rects.items()):
-                        if rect.contains(pos):
-                            self.roi_overlay.clear_alarm_requested.emit(idx)
-                            return True
-
             if event.type() in (QEvent.Resize, QEvent.Move, QEvent.Show):
                 if hasattr(self, "roi_overlay") and self.roi_overlay:
                     self.roi_overlay.setGeometry(self.webview.rect())
                     self.roi_overlay.raise_()
-                    if hasattr(self, "web_control_bar"):
-                        self.position_web_control_bar()
 
         return super().eventFilter(obj, event)
 
@@ -958,6 +858,10 @@ class MainWindow(QMainWindow):
         if self.is_fullscreen: return
         is_visible = self.left_panel.isVisible()
         self.left_panel.setVisible(not is_visible)
+        self.left_panel.setGeometry(0, 0, 350 if not is_visible else 0, self.centralWidget().height())
+        self.toggle_bar.setGeometry(350 if not is_visible else 0, 0, 14, self.centralWidget().height())
+        self.toggle_bar.raise_()
+        if self.roi_overlay: self.roi_overlay.raise_()
         self.toggle_btn.setText(">" if is_visible else "<")
 
     def on_zoom_changed(self, value):
@@ -1075,12 +979,6 @@ class MainWindow(QMainWindow):
         text = f"⏱️ 刷新: {refresh_str} | OCR检测: {roi_str}"
         if hasattr(self, 'roi_overlay') and self.roi_overlay:
             self.roi_overlay.update_countdown_text(text)
-        if hasattr(self, 'web_control_countdown'):
-            self.web_control_countdown.setText(text)
-            self.web_control_bar.adjustSize()
-            self.position_web_control_bar()
-            self.web_control_bar.show()
-            self.web_control_bar.raise_()
 
     def segment_rows(self, img_bgr):
         h_img, w_img = img_bgr.shape[:2]
@@ -1277,8 +1175,6 @@ class MainWindow(QMainWindow):
     def clear_all_alarms(self):
         for box_idx in range(1, len(self.roi_list) + 1):
             self.clear_alarm_for_box(box_idx)
-        if hasattr(self, "floating_alarm_button"):
-            self.floating_alarm_button.hide()
 
     def stop_alarm_audio(self):
         if self.alarm_loop_timer.isActive():
@@ -1312,9 +1208,56 @@ class MainWindow(QMainWindow):
             else:
                 self.sound_combo.setCurrentIndex(0)
 
+    def open_account_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("账号设置")
+        dlg.setModal(True)
+        dlg.resize(360, 170)
+        layout = QVBoxLayout(dlg)
+        row1 = QHBoxLayout(); row1.addWidget(QLabel("账号"))
+        account = QLineEdit(self.config.get("account", "")); account.setPlaceholderText("请输入账号")
+        row1.addWidget(account, 1); layout.addLayout(row1)
+        row2 = QHBoxLayout(); row2.addWidget(QLabel("密码"))
+        password = QLineEdit(self.config.get("password", "")); password.setEchoMode(QLineEdit.Password); password.setPlaceholderText("请输入密码")
+        row2.addWidget(password, 1); layout.addLayout(row2)
+        buttons = QHBoxLayout(); buttons.addStretch()
+        cancel = QPushButton("取消"); save = QPushButton("保存")
+        buttons.addWidget(cancel); buttons.addWidget(save); layout.addLayout(buttons)
+        cancel.clicked.connect(dlg.reject)
+        def do_save():
+            self.config["account"] = account.text().strip()
+            self.config["password"] = password.text()
+            save_config(self.config)
+            self.account_btn.setText("👤 账号 ✓" if self.config["account"] and self.config["password"] else "👤 账号")
+            self.log("👤 账号密码已保存")
+            dlg.accept()
+        save.clicked.connect(do_save)
+        dlg.exec()
+
+    def on_memory_cleanup_changed(self, state):
+        enabled = bool(state)
+        self.config["auto_memory_cleanup"] = enabled
+        save_config(self.config)
+        if enabled:
+            self.memory_cleanup_timer.start()
+            self.log("🧹 内存自动清理已开启：每小时执行一次")
+        else:
+            self.memory_cleanup_timer.stop()
+            self.log("🧹 内存自动清理已关闭")
+
+    def cleanup_memory(self):
+        try:
+            gc.collect()
+            if sys.platform == "win32":
+                import ctypes
+                ctypes.windll.psapi.EmptyWorkingSet(ctypes.windll.kernel32.GetCurrentProcess())
+            self.log("🧹 已完成一次内存清理")
+        except Exception as e:
+            self.log(f"⚠️ 内存清理失败: {e}")
+
     def paste_credentials(self):
-        account = self.account_input.text().strip()
-        password = self.password_input.text().strip()
+        account = self.config.get("account", "").strip()
+        password = self.config.get("password", "").strip()
         if not account or not password: return
         safe_account = json.dumps(account)
         safe_password = json.dumps(password)
@@ -1426,7 +1369,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'refresh_clock'): self.refresh_clock.stop()
         if hasattr(self, 'roi_clock_timer'): self.roi_clock_timer.stop()
         if hasattr(self, 'alarm_loop_timer'): self.alarm_loop_timer.stop()
-        if hasattr(self, 'floating_alarm_button'): self.floating_alarm_button.close()
         self.tray.hide()
         QApplication.quit()
         try:
