@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V15.0 - 右上角设置菜单版)
+网页刷新数字监控 (V15.1 - 右上角设置版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
@@ -55,6 +55,7 @@ def load_config():
         "zoom_level": 1.0,
         "auto_refresh": False,
         "auto_interval": 60,
+        "panel_collapsed": False,
         "screenshot_path": os.getcwd(),
         "selected_ip": "",
         "reminder_sound_index": 0,
@@ -209,23 +210,556 @@ class PersistentROIOverlay(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "settings_btn") and hasattr(self, "centralWidget"):
-            cw = self.centralWidget()
-            self.settings_btn.move(cw.width() - self.settings_btn.width() - 10, 10)
-        if hasattr(self, "settings_panel") and hasattr(self, "centralWidget"):
-            cw = self.centralWidget()
-            self.settings_panel.setGeometry(max(0, cw.width() - self.settings_panel.width() - 10),
-                                            50, self.settings_panel.width(), max(0, cw.height() - 60))
+        self.reposition_bars()
+
+    def reposition_bars(self):
+        self.bar.adjustSize()
+        self.bar.move(max(8,(self.width()-self.bar.width())//2), 10)
+        self.top_right_bar.adjustSize()
+        self.top_right_bar.move(max(8,self.width()-self.top_right_bar.width()-10), 10)
+
+    def update_countdown_text(self, text):
+        self.countdown_text=text
+        self.lbl_countdown.setText(text)
+        self.top_right_bar.adjustSize()
+        self.reposition_bars()
+
+    def toggle_boxes_visibility(self):
+        self.boxes_visible=not self.boxes_visible
+        self.btn_toggle_vis.setText("👁️ 隐藏识别框" if self.boxes_visible else "👁️ 显示识别框")
+        self.update()
+
+    def on_top_right_gear_clicked(self):
+        if self.is_editing:
+            self.finish_editing()
+        else:
+            self.boxes_visible=True
+            self.btn_toggle_vis.setText("👁️ 隐藏识别框")
+            self.start_editing(self.rects)
+
+    def start_editing(self, existing_rects):
+        # 编辑识别框时才接管鼠标；平时网页完全不受 Overlay 影响。
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.is_editing=True
+        self.rects=[QRect(r) for r in existing_rects]
+        self.drag_idx=None; self.drag_action=None; self.current_draw_rect=None
+        self.setCursor(Qt.CrossCursor)
+        self.bar.show(); self.reposition_bars(); self.bar.raise_(); self.top_right_bar.raise_(); self.raise_()
+        self.tip_label.setText(f"网页内调整：拖动/缩放 | 当前 {len(self.rects)} 个选框")
+        self.update()
+
+    def finish_editing(self):
+        self.is_editing=False
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setCursor(Qt.ArrowCursor)
+        self.bar.hide()
+        self.roi_list_selected.emit([QRect(r) for r in self.rects])
+        self.update()
+
+    def cancel_editing(self):
+        self.is_editing=False
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setCursor(Qt.ArrowCursor)
+        self.bar.hide()
+        self.update()
+
+    def clear_rects(self):
+        self.rects.clear()
+        self.tip_label.setText("网页内调整：拖动框体移动 | 拖四角缩放 | 空白处划框")
+        self.update()
+
+    def set_alarm_states(self, states):
+        self.alarm_states=dict(states)
+        self.update_alarm_buttons()
+        self.update()
+
+    def _screen_to_local(self, rect):
+        if not self.parentWidget(): return QRect()
+        p1=self.mapFromGlobal(QPoint(rect.x(),rect.y()))
+        p2=self.mapFromGlobal(QPoint(rect.x()+rect.width(),rect.y()+rect.height()))
+        return QRect(p1,p2).normalized()
+
+    def _local_to_screen(self, pos):
+        return self.mapToGlobal(pos)
+
+    def _get_handle_at(self, rect, pos):
+        r=self._screen_to_local(rect); s=10
+        for p,n in [(r.topLeft(),'NW'),(r.topRight(),'NE'),(r.bottomLeft(),'SW'),(r.bottomRight(),'SE')]:
+            if (pos-p).manhattanLength()<=s: return n
+        if r.contains(pos): return 'MOVE'
+        return None
+
+    def mousePressEvent(self,event):
+        if event.button()!=Qt.LeftButton: return
+        pos=event.position().toPoint()
+        if not self.is_editing:
+            return
+        if self.bar.geometry().contains(pos) or self.top_right_bar.geometry().contains(pos): return
+        screen_pos=self._local_to_screen(pos)
+        for idx in reversed(range(len(self.rects))):
+            action=self._get_handle_at(self.rects[idx],pos)
+            if action:
+                self.drag_idx=idx; self.drag_action=action; self.drag_start_screen=screen_pos; self.orig_rect=QRect(self.rects[idx]); return
+        self.drag_action='DRAW'; self.drag_start_screen=screen_pos; self.current_draw_rect=QRect(screen_pos,screen_pos); self.update()
+
+    def mouseMoveEvent(self,event):
+        if not self.is_editing or not self.drag_action: return
+        screen_pos=self._local_to_screen(event.position().toPoint())
+        delta=screen_pos-self.drag_start_screen
+        if self.drag_action=='MOVE':
+            self.rects[self.drag_idx]=self.orig_rect.translated(delta)
+        elif self.drag_action=='SE':
+            self.rects[self.drag_idx]=QRect(self.orig_rect.topLeft(),screen_pos).normalized()
+        elif self.drag_action=='NW':
+            self.rects[self.drag_idx]=QRect(screen_pos,self.orig_rect.bottomRight()).normalized()
+        elif self.drag_action=='NE':
+            self.rects[self.drag_idx]=QRect(QPoint(self.orig_rect.left(),screen_pos.y()),QPoint(screen_pos.x(),self.orig_rect.bottom())).normalized()
+        elif self.drag_action=='SW':
+            self.rects[self.drag_idx]=QRect(QPoint(screen_pos.x(),self.orig_rect.top()),QPoint(self.orig_rect.right(),screen_pos.y())).normalized()
+        elif self.drag_action=='DRAW':
+            self.current_draw_rect=QRect(self.drag_start_screen,screen_pos).normalized()
+        self.update()
+
+    def mouseReleaseEvent(self,event):
+        if event.button()==Qt.LeftButton and self.is_editing:
+            if self.drag_action=='DRAW' and self.current_draw_rect and self.current_draw_rect.width()>10 and self.current_draw_rect.height()>10:
+                self.rects.append(self.current_draw_rect)
+            self.drag_action=None; self.drag_idx=None; self.current_draw_rect=None
+            self.tip_label.setText(f"网页内调整：拖动/缩放 | 当前 {len(self.rects)} 个选框")
+            self.update()
+
+    def update_alarm_buttons(self):
+        active = set()
+        for i, r in enumerate(self.rects, 1):
+            if not self.alarm_states.get(i, False) or not self.boxes_visible:
+                continue
+            active.add(i)
+            local_r = self._screen_to_local(r)
+            if local_r.isEmpty():
+                continue
+            btn = self.alarm_buttons.get(i)
+            if btn is None:
+                btn = QPushButton("🔕 消除报警", self.parentWidget())
+                btn.setFixedSize(92, 26)
+                btn.setStyleSheet("QPushButton{background:#ef4444;color:white;border:1px solid #fecaca;border-radius:5px;font-size:11px;font-weight:bold;padding:2px 5px;} QPushButton:hover{background:#dc2626;}")
+                btn.clicked.connect(lambda checked=False, idx=i: self.clear_alarm_requested.emit(idx))
+                self.alarm_buttons[i] = btn
+            x = max(2, local_r.right() - btn.width())
+            y = max(2, local_r.top() - btn.height() - 4)
+            btn.move(x, y)
+            btn.show()
+            btn.raise_()
+        for i, btn in list(self.alarm_buttons.items()):
+            if i not in active:
+                btn.hide()
+        self.top_right_bar.raise_()
+        if self.is_editing:
+            self.bar.raise_()
+
+    def paintEvent(self,event):
+        painter=QPainter(self)
+        if not self.boxes_visible and not self.is_editing:
+            # 控制栏仍保留在网页右上角，只有识别框被隐藏
+            return
+        for i,r in enumerate(self.rects,1):
+            local_r=self._screen_to_local(r)
+            if local_r.isEmpty(): continue
+            alarm=self.alarm_states.get(i,False)
+            color=QColor("#ef4444") if alarm else QColor("#00ff66")
+            painter.setPen(QPen(color,3 if alarm else 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(local_r)
+            badge=QRect(local_r.x(),max(0,local_r.y()-21),42,21)
+            painter.fillRect(badge,color)
+            painter.setPen(QPen(QColor("#000000")))
+            painter.drawText(badge,Qt.AlignCenter,f"#{i}")
+            if self.is_editing:
+                hs=8
+                painter.setPen(QPen(QColor("#38bdf8"),2)); painter.setBrush(QColor("#ffffff"))
+                for c in [local_r.topLeft(),local_r.topRight(),local_r.bottomLeft(),local_r.bottomRight()]:
+                    painter.drawRect(c.x()-hs//2,c.y()-hs//2,hs,hs)
+        if self.is_editing and self.drag_action=='DRAW' and self.current_draw_rect:
+            local_draw=self._screen_to_local(self.current_draw_rect)
+            painter.setPen(QPen(QColor("#38bdf8"),2,Qt.DashLine)); painter.setBrush(Qt.NoBrush); painter.drawRect(local_draw)
+
+
+# ==================== 6. HTTP 服务器与扫码对话框 ====================
+class ScreenshotHTTPHandler(BaseHTTPRequestHandler):
+    latest_path = ""
+    def log_message(self, format, *args): pass
+
+    def do_GET(self):
+        parsed_url = urllib.parse.urlparse(self.path)
+        requested_file = os.path.basename(parsed_url.path)
+        if ScreenshotHTTPHandler.latest_path and os.path.exists(ScreenshotHTTPHandler.latest_path):
+            if requested_file == os.path.basename(ScreenshotHTTPHandler.latest_path):
+                try:
+                    with open(ScreenshotHTTPHandler.latest_path, 'rb') as f:
+                        content = f.read()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'image/png')
+                    self.send_header('Content-Length', str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                    return
+                except:
+                    pass
+        self.send_response(404)
+        self.end_headers()
+        self.wfile.write(b"File not found or expired.")
+
+
+class QRDialog(QDialog):
+    def __init__(self, parent, pixmap, url):
+        super().__init__(parent)
+        self.setWindowTitle("📸 手机扫码查看最新截图")
+        self.setModal(True)
+        self.resize(320, 390)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        img_label = QLabel()
+        img_label.setPixmap(pixmap)
+        img_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(img_label)
+        
+        tip_label = QLabel("📢 请确保【手机】与【电脑】连接在同一个 Wi-Fi 局域网下。")
+        tip_label.setAlignment(Qt.AlignCenter)
+        tip_label.setWordWrap(True)
+        tip_label.setStyleSheet("color: #a6adc8; font-size: 12px; font-weight: bold;")
+        layout.addWidget(tip_label)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineCertificateError, QWebEngineScript
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
+class CustomWebPage(QWebEnginePage):
+    def certificateError(self, error: QWebEngineCertificateError) -> bool:
+        error.acceptCertificate()
+        return True
+
+
+# ==================== 7. 主窗口核心业务逻辑 ====================
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("网页刷新数字监控 (V15.1 - 右上角设置版)")
+        self.resize(1380, 880)
+        self.config = load_config()
+
+        if os.path.exists("1.ico"):
+            self.setWindowIcon(QIcon("1.ico"))
+
+        from PySide6.QtNetwork import QNetworkAccessManager
+        self.nam = QNetworkAccessManager(self)
+        self.current_file_url = ""
+        self.custom_sound_path = self.config.get("reminder_custom_path", "")
+        self.sound_files_map = {}
+        self.is_fullscreen = False
+
+        self.ocr = None
+        self.init_ddddocr_engines()
+
+        saved_roi_list = self.config.get("roi_list", [[100, 100, 300, 200]])
+        self.roi_list = [QRect(r[0], r[1], r[2], r[3]) for r in saved_roi_list]
+
+        # 已记忆消报的数量与组合特征
+        self.box_latest_digits = {}
+        self.box_ack_count = {}      
+        self.box_ack_matches = {}    
+        self.box_is_alarming = {}
+
+        self.start_local_server()
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ---------- 右上角浮层设置面板 ----------
+        self.left_panel = QWidget()
+        self.left_panel.setFixedWidth(360)
+        left_layout = QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+
+        # 折叠面板组件
+        self.combined_panel = CombinedCollapsiblePanel()
+        
+        # 1. 页面设置与刷新
+        grp_url = QGroupBox("一. 页面设置与刷新")
+        g_url = QVBoxLayout(grp_url)
+        
+        h_url = QHBoxLayout()
+        self.url_input = QLineEdit(self.config["url"])
+        self.url_input.setPlaceholderText("请输入网页地址...")
+        self.url_input.returnPressed.connect(self.load_page)
+        self.load_btn = QPushButton("🌐")
+        self.load_btn.setToolTip("加载页面")
+        self.load_btn.setFixedWidth(36)
+        self.load_btn.clicked.connect(self.load_page)
+        h_url.addWidget(self.url_input)
+        h_url.addWidget(self.load_btn)
+        g_url.addLayout(h_url)
+
+        h_opts = QHBoxLayout()
+        h_opts.addWidget(QLabel("缩放:"))
+        self.zoom_spin = QSpinBox()
+        self.zoom_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.zoom_spin.setRange(25, 300)
+        self.zoom_spin.setValue(int(self.config.get("zoom_level", 1.0) * 100))
+        self.zoom_spin.setFixedWidth(45)
+        self.zoom_spin.valueChanged.connect(self.on_zoom_changed)
+        h_opts.addWidget(self.zoom_spin)
+        h_opts.addWidget(QLabel("%"))
+
+        h_opts.addWidget(QLabel("刷新间隔:"))
+        self.auto_interval = QSpinBox()
+        self.auto_interval.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.auto_interval.setRange(1, 3600)
+        self.auto_interval.setValue(self.config.get("auto_interval", 60))
+        self.auto_interval.setFixedWidth(45)
+        self.auto_interval.valueChanged.connect(self.update_auto_interval)
+        h_opts.addWidget(self.auto_interval)
+        h_opts.addWidget(QLabel("s"))
+        
+        self.auto_refresh_cb = QCheckBox("自动")
+        self.auto_refresh_cb.stateChanged.connect(self.on_auto_refresh_changed)
+        h_opts.addWidget(self.auto_refresh_cb)
+
+        g_url.addLayout(h_opts)
+
+        self.countdown_label = QLabel("")
+        self.countdown_label.setStyleSheet("color: #0ea5e9; font-weight: bold; font-size: 11px;")
+        g_url.addWidget(self.countdown_label)
+
+        self.combined_panel.container_layout.addWidget(grp_url)
+
+        # 2. 账号密码
+        grp_auth = QGroupBox("二. 账号密码")
+        g_auth = QVBoxLayout(grp_auth)
+        
+        h_creds = QHBoxLayout()
+        self.account_btn = QPushButton("👤 账号")
+        self.account_btn.setToolTip("设置账号和密码")
+        self.account_btn.clicked.connect(self.open_account_dialog)
+        h_creds.addWidget(self.account_btn, 1)
+
+        self.paste_btn = QPushButton("📋 一键粘贴 (自动按下回车)")
+        self.paste_btn.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold; padding: 5px;")
+        self.paste_btn.clicked.connect(self.paste_credentials)
+        h_creds.addWidget(self.paste_btn, 2)
+        g_auth.addLayout(h_creds)
+        self.account_btn.setText("👤 账号 ✓" if self.config.get("account") and self.config.get("password") else "👤 账号")
+
+        self.combined_panel.container_layout.addWidget(grp_auth)
+
+        # 3. 声音与报警提醒
+        grp_reminder = QGroupBox("三. 声音与报警提醒")
+        g_reminder = QVBoxLayout(grp_reminder)
+        
+        h_rem_sound = QHBoxLayout()
+        h_rem_sound.addWidget(QLabel("声音选择:"))
+        self.sound_combo = QComboBox()
+        self.populate_sound_options()
+        self.sound_combo.currentIndexChanged.connect(self.on_sound_selection_changed)
+        h_rem_sound.addWidget(self.sound_combo, stretch=1)
+        
+        self.listen_btn = QPushButton("🎵 试听")
+        self.listen_btn.clicked.connect(lambda: self.trigger_single_sound()) 
+        h_rem_sound.addWidget(self.listen_btn)
+
+        g_reminder.addLayout(h_rem_sound)
+        self.combined_panel.container_layout.addWidget(grp_reminder)
+
+        # 4. 截图与扫码
+        grp_snap = QGroupBox("四. 截图与扫码")
+        g_snap = QHBoxLayout(grp_snap)
+        
+        g_snap.addWidget(QLabel("IP:"))
+        self.ip_combo = QComboBox()
+        g_snap.addWidget(self.ip_combo, stretch=1)
+        
+        self.snap_btn = QPushButton("📸 截图与扫码")
+        self.snap_btn.clicked.connect(self.take_screenshot)
+        self.snap_btn.setStyleSheet("font-weight: bold; background-color: #10b981; color: white; padding: 5px;")
+        g_snap.addWidget(self.snap_btn)
+        
+        self.combined_panel.container_layout.addWidget(grp_snap)
+
+        # 5. 保存配置按钮
+        self.save_btn = QPushButton("💾 保存基础配置")
+        self.save_btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white; padding: 6px; font-size: 12px; border-radius: 4px;")
+        self.save_btn.clicked.connect(self.save_settings)
+        self.combined_panel.container_layout.addWidget(self.save_btn)
+
+        left_layout.addWidget(self.combined_panel)
+
+        # 6. 🎯 数字监控面板
+        grp_roi = QGroupBox("🎯 数字监控 (通过网页右上角 ⚙️ 调整识别框)")
+        g_roi = QVBoxLayout()
+
+        h_roi_top = QHBoxLayout()
+        self.select_roi_btn = QPushButton("📐 框选调整窗口")
+        self.select_roi_btn.clicked.connect(self.start_roi_selection)
+        h_roi_top.addWidget(self.select_roi_btn)
+
+        self.clear_roi_btn = QPushButton("🗑️ 清空选框")
+        self.clear_roi_btn.clicked.connect(self.clear_all_rois)
+        h_roi_top.addWidget(self.clear_roi_btn)
+
+        self.manual_trigger_btn = QPushButton("🔍 手动检测")
+        self.manual_trigger_btn.setStyleSheet("background-color: #3b82f6; color: white; font-weight: bold;")
+        self.manual_trigger_btn.clicked.connect(self.on_manual_detect_clicked)
+        h_roi_top.addWidget(self.manual_trigger_btn)
+
+        g_roi.addLayout(h_roi_top)
+
+        h_rule1 = QHBoxLayout()
+        h_rule1.addWidget(QLabel("相同行数:"))
+        self.target_same_count_spin = QSpinBox()
+        self.target_same_count_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.target_same_count_spin.setRange(1, 10)
+        self.target_same_count_spin.setValue(self.config.get("target_same_count", 3))
+        self.target_same_count_spin.setFixedWidth(35)
+        h_rule1.addWidget(self.target_same_count_spin)
+
+        h_rule1.addWidget(QLabel("目标数值:"))
+        self.target_value_input = QLineEdit(self.config.get("target_value", ""))
+        self.target_value_input.setPlaceholderText("例如: 0.193")
+        h_rule1.addWidget(self.target_value_input)
+        g_roi.addLayout(h_rule1)
+
+        h_roi_cfg = QHBoxLayout()
+        self.roi_toggle_btn = QPushButton("▶️ 定时检测")
+        self.roi_toggle_btn.clicked.connect(self.toggle_roi_monitor)
+        self.roi_toggle_btn.setStyleSheet("background-color: #10b981; color: white; font-weight: bold;")
+        h_roi_cfg.addWidget(self.roi_toggle_btn)
+
+        h_roi_cfg.addWidget(QLabel("检测间隔(刷新倍数):"))
+        self.roi_multiplier_spin = QSpinBox()
+        self.roi_multiplier_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.roi_multiplier_spin.setRange(1, 1000)
+        self.roi_multiplier_spin.setValue(self.config.get("roi_multiplier", 1))
+        self.roi_multiplier_spin.setFixedWidth(35)
+        h_roi_cfg.addWidget(self.roi_multiplier_spin)
+        h_roi_cfg.addWidget(QLabel("倍"))
+        g_roi.addLayout(h_roi_cfg)
+
+        self.roi_countdown_label = QLabel("")
+        self.roi_countdown_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
+        g_roi.addWidget(self.roi_countdown_label)
+
+        self.clear_alarm_panel_btn = QPushButton("🚨 消除所有报警")
+        self.clear_alarm_panel_btn.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold; padding: 5px;")
+        self.clear_alarm_panel_btn.clicked.connect(self.clear_all_alarms)
+        g_roi.addWidget(self.clear_alarm_panel_btn)
+
+        self.roi_info_label = QLabel(f"选中区域: {len(self.roi_list)} 个选框")
+        self.roi_info_label.setStyleSheet("color: #38bdf8; font-size: 11px;")
+        g_roi.addWidget(self.roi_info_label)
+
+        self.roi_status_label = QLabel("状态: 待检测")
+        self.roi_status_label.setStyleSheet("color: #fbbf24; font-size: 11px;")
+        self.roi_status_label.setWordWrap(True)
+        g_roi.addWidget(self.roi_status_label)
+
+        grp_roi.setLayout(g_roi)
+        left_layout.addWidget(grp_roi)
+
+        # 7. 📋 运行日志面板
+        grp_log = QGroupBox("📋 运行日志")
+        g_log = QVBoxLayout()
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setMinimumHeight(120)
+        self.log_box.setStyleSheet("font-size: 11px; background-color: #11111b; color: #a6adc8; border: 1px solid #313244;")
+        g_log.addWidget(self.log_box)
+        grp_log.setLayout(g_log)
+        left_layout.addWidget(grp_log, stretch=1)
+
+        self.status_label = QLabel("系统就绪")
+        left_layout.addWidget(self.status_label)
+
+        # ---------- 右上角设置按钮 ----------
+        self.settings_btn = QPushButton("⚙ 设置", central)
+        self.settings_btn.setFixedSize(82, 34)
+        self.settings_btn.setStyleSheet("""
+            QPushButton { background-color: #181825; color: #ffffff; border: 1px solid #45475a; border-radius: 6px; font-weight: bold; padding: 4px 8px; }
+            QPushButton:hover { background-color: #313244; }
+        """)
+        self.settings_btn.clicked.connect(self.toggle_settings_panel)
+        self.settings_btn.show()
+
+        # ---------- 右侧：浏览器 ----------
+        self.webview = QWebEngineView()
+        self.custom_page = CustomWebPage(self.webview)
+        self.webview.setPage(self.custom_page)
+        self.webview.setZoomFactor(self.config.get("zoom_level", 1.0))
+        self.setup_user_script()
+        self.webview.loadFinished.connect(self.on_load_finished)
+
+        # 网页始终占满整个窗口；设置面板作为右侧浮层覆盖在网页上，不压缩网页显示区域。
+        main_layout.addWidget(self.webview, stretch=1)
+        self.left_panel.setParent(central)
+        self.settings_open = False
+        self.left_panel.hide()
+        self.settings_btn.raise_()
+
+        # ---------- 定时器与 Overlay ----------
+        self.refresh_clock = QTimer()
+        self.refresh_clock.timeout.connect(self.on_refresh_clock_tick)
+        self.remaining_seconds = 0
+
+        self.alarm_loop_timer = QTimer()
+        self.alarm_loop_timer.timeout.connect(self.execute_single_alarm_tick)
+
+        self.roi_clock_timer = QTimer()
+        self.roi_clock_timer.timeout.connect(self.on_roi_clock_tick)
+        self.roi_remaining_seconds = 0
+
+        self.roi_overlay = PersistentROIOverlay(self.webview)
+        self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
+        self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
+        self.roi_overlay.rects = list(self.roi_list)
+        self.roi_overlay.setGeometry(self.webview.rect())
+        self.roi_overlay.raise_()
+        self.webview.installEventFilter(self)
+
+        # ---------- 系统托盘 ----------
+        tray_icon = QIcon("1.ico") if os.path.exists("1.ico") else QIcon.fromTheme("face-smile")
+        self.tray = QSystemTrayIcon(tray_icon, self)
+        tray_menu = QMenu()
+        tray_menu.addAction("显示窗口", self.show)
+        tray_menu.addAction("完全退出程序", self.quit_app)
+        self.tray.setContextMenu(tray_menu)
+        self.tray.show()
+
+        self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
+        self.refresh_ip_list()
+        self.update_top_right_countdown_bar()
+        
+        self.log("🚀 系统初始化完成 (V15.1 - 右上角设置版)")
+        if self.config["url"]:
+            self.load_page()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "left_panel") and hasattr(self, "centralWidget"):
+            h = self.centralWidget().height()
+            w = self.left_panel.width() if hasattr(self, "left_panel") else 360
+            self.left_panel.setGeometry(max(0, self.centralWidget().width() - w), 48, w, max(0, h - 48))
+        if hasattr(self, "settings_btn"):
+            self.settings_btn.move(max(0, self.centralWidget().width() - self.settings_btn.width() - 10), 8)
         if hasattr(self, "roi_overlay"):
             self.roi_overlay.setGeometry(self.webview.rect())
             self.roi_overlay.raise_()
-        if hasattr(self, "settings_btn"):
-            self.settings_btn.raise_()
-        if hasattr(self, "settings_panel") and self.settings_panel.isVisible():
-            self.settings_panel.raise_()
-            self.settings_btn.raise_()
-        if hasattr(self, "roi_overlay"):
-            self.roi_overlay.raise_()
+            self.update_alarm_buttons()
 
     def eventFilter(self, obj, event):
         if hasattr(self, "webview") and obj is self.webview:
@@ -301,20 +835,18 @@ class PersistentROIOverlay(QWidget):
         self.webview.page().profile().scripts().insert(script)
 
     def toggle_settings_panel(self):
-        visible = self.settings_panel.isVisible()
-        if visible:
-            self.settings_panel.hide()
-            self.settings_btn.setText("⚙️ 设置")
+        if self.is_fullscreen:
+            return
+        self.settings_open = not getattr(self, "settings_open", False)
+        self.left_panel.setVisible(self.settings_open)
+        if self.settings_open:
+            self.left_panel.raise_()
             self.settings_btn.raise_()
-            self.log("⚙️ 设置菜单已收起")
+            self.settings_btn.setText("✕ 收起")
         else:
-            self.settings_panel.setGeometry(max(0, self.centralWidget().width() - self.settings_panel.width() - 10),
-                                            50, self.settings_panel.width(), max(0, self.centralWidget().height() - 60))
-            self.settings_panel.show()
-            self.settings_panel.raise_()
-            self.settings_btn.setText("▲ 收起")
-            self.settings_btn.raise_()
-            self.log("⚙️ 设置菜单已展开（不影响网页显示区域）")
+            self.settings_btn.setText("⚙ 设置")
+        self.roi_overlay.raise_()
+        self.settings_btn.raise_()
 
     def on_zoom_changed(self, value):
         factor = value / 100.0
@@ -723,7 +1255,8 @@ class PersistentROIOverlay(QWidget):
 
     def save_settings(self):
         self.config["url"] = self.url_input.text().strip()
-        # 账号和密码由独立“账号”弹窗保存，这里不再读取已删除的输入框。
+        self.config["account"] = self.account_input.text().strip()
+        self.config["password"] = self.password_input.text().strip()
         self.config["zoom_level"] = self.zoom_spin.value() / 100.0
         self.config["auto_refresh"] = self.auto_refresh_cb.isChecked()
         self.config["auto_interval"] = self.auto_interval.value()
@@ -782,15 +1315,12 @@ class PersistentROIOverlay(QWidget):
     def toggle_fullscreen(self):
         if self.is_fullscreen:
             self.showNormal()
+            self.settings_btn.show()
             self.is_fullscreen = False
-            if hasattr(self, "settings_btn"):
-                self.settings_btn.show()
-                self.settings_btn.raise_()
         else:
-            if hasattr(self, "settings_panel"):
-                self.settings_panel.hide()
-            if hasattr(self, "settings_btn"):
-                self.settings_btn.hide()
+            self.left_panel.hide()
+            self.settings_open = False
+            self.settings_btn.hide()
             self.showFullScreen()
             self.is_fullscreen = True
 
