@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V15.1 - 右上角设置版)
+网页刷新数字监控 (V16.0 - 可拖拽最上层控制栏版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
     - ⏱️ 实时显示【网页刷新倒计时】与【OCR检测倒计时】
     - 👁️ 一键【隐藏/显示所有识别窗口】
-    - ⚙️ 点击统一【调整所有框选窗口】（拖拽/拉伸/增删框选）
+    - ⚙️ 【设置/收起】打开或关闭设置浮层
+    - 控制栏位于最上层，可拖拽移动，按钮始终可点击
  3. 继承 V10.8 增量防重复报警逻辑，解决消除报警后表格新增行导致误报的问题。
 依赖：PySide6, PySide6.QtWebEngineWidgets, ddddocr, opencv-python, numpy
 """
@@ -189,24 +190,7 @@ class PersistentROIOverlay(QWidget):
         bl.addWidget(self.tip_label,1); bl.addWidget(self.btn_done); bl.addWidget(self.btn_clear); bl.addWidget(self.btn_cancel)
         self.bar.hide()
 
-        self.top_right_bar=QWidget(self)
-        self.top_right_bar.setStyleSheet("""
-            QWidget { background:#181825; border:1px solid #45475a; border-radius:6px; }
-            QLabel { color:#38bdf8; font-weight:bold; font-size:11px; padding:0 3px; }
-            QPushButton { background:#313244; color:#cdd6f4; border:1px solid #45475a;
-                          border-radius:4px; padding:5px 9px; font-size:11px; font-weight:bold; }
-            QPushButton:hover { background:#45475a; color:#fff; }
-        """)
-        tr=QHBoxLayout(self.top_right_bar); tr.setContentsMargins(7,4,7,4); tr.setSpacing(5)
-        self.lbl_countdown=QLabel(self.countdown_text)
-        self.btn_toggle_vis=QPushButton("👁️ 隐藏识别框")
-        self.btn_gear=QPushButton("⚙️ 调整识别框")
-        self.btn_toggle_vis.clicked.connect(self.toggle_boxes_visibility)
-        self.btn_gear.clicked.connect(self.on_top_right_gear_clicked)
-        tr.addWidget(self.lbl_countdown); tr.addWidget(self.btn_toggle_vis); tr.addWidget(self.btn_gear)
-        self.top_right_bar.show()
-        self.raise_()
-        self.reposition_bars()
+        # 顶部控制栏由 MainWindow 的 FloatingControlBar 独立承载，避免 Overlay 透明鼠标导致按钮无法点击。
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -215,27 +199,13 @@ class PersistentROIOverlay(QWidget):
     def reposition_bars(self):
         self.bar.adjustSize()
         self.bar.move(max(8,(self.width()-self.bar.width())//2), 10)
-        self.top_right_bar.adjustSize()
-        self.top_right_bar.move(max(8,self.width()-self.top_right_bar.width()-10), 10)
 
     def update_countdown_text(self, text):
         self.countdown_text=text
-        self.lbl_countdown.setText(text)
-        self.top_right_bar.adjustSize()
-        self.reposition_bars()
 
     def toggle_boxes_visibility(self):
         self.boxes_visible=not self.boxes_visible
-        self.btn_toggle_vis.setText("👁️ 隐藏识别框" if self.boxes_visible else "👁️ 显示识别框")
         self.update()
-
-    def on_top_right_gear_clicked(self):
-        if self.is_editing:
-            self.finish_editing()
-        else:
-            self.boxes_visible=True
-            self.btn_toggle_vis.setText("👁️ 隐藏识别框")
-            self.start_editing(self.rects)
 
     def start_editing(self, existing_rects):
         # 编辑识别框时才接管鼠标；平时网页完全不受 Overlay 影响。
@@ -244,7 +214,7 @@ class PersistentROIOverlay(QWidget):
         self.rects=[QRect(r) for r in existing_rects]
         self.drag_idx=None; self.drag_action=None; self.current_draw_rect=None
         self.setCursor(Qt.CrossCursor)
-        self.bar.show(); self.reposition_bars(); self.bar.raise_(); self.top_right_bar.raise_(); self.raise_()
+        self.bar.show(); self.reposition_bars(); self.bar.raise_(); self.raise_()
         self.tip_label.setText(f"网页内调整：拖动/缩放 | 当前 {len(self.rects)} 个选框")
         self.update()
 
@@ -294,7 +264,7 @@ class PersistentROIOverlay(QWidget):
         pos=event.position().toPoint()
         if not self.is_editing:
             return
-        if self.bar.geometry().contains(pos) or self.top_right_bar.geometry().contains(pos): return
+        if self.bar.geometry().contains(pos): return
         screen_pos=self._local_to_screen(pos)
         for idx in reversed(range(len(self.rects))):
             action=self._get_handle_at(self.rects[idx],pos)
@@ -352,7 +322,6 @@ class PersistentROIOverlay(QWidget):
         for i, btn in list(self.alarm_buttons.items()):
             if i not in active:
                 btn.hide()
-        self.top_right_bar.raise_()
         if self.is_editing:
             self.bar.raise_()
 
@@ -442,6 +411,83 @@ class CustomWebPage(QWebEnginePage):
     def certificateError(self, error: QWebEngineCertificateError) -> bool:
         error.acceptCertificate()
         return True
+
+
+# ==================== 7. 右上角最上层控制栏 ====================
+class FloatingControlBar(QWidget):
+    """独立于网页 Overlay 的最上层控制栏，可点击按钮并拖拽。"""
+    moved = Signal()
+
+    def __init__(self, parent, on_hide_show, on_settings):
+        super().__init__(parent)
+        self._drag_offset = None
+        self._dragging = False
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("""
+            QWidget { background:#181825; border:1px solid #45475a; border-radius:7px; }
+            QLabel { color:#38bdf8; font-weight:bold; font-size:11px; padding:0 3px; background:transparent; border:none; }
+            QPushButton { background:#313244; color:#cdd6f4; border:1px solid #45475a;
+                          border-radius:5px; padding:5px 9px; font-size:11px; font-weight:bold; }
+            QPushButton:hover { background:#45475a; color:#fff; }
+        """)
+        layout=QHBoxLayout(self)
+        layout.setContentsMargins(7,4,7,4)
+        layout.setSpacing(5)
+        self.lbl_countdown=QLabel("⏱️ 刷新: -- | 识别: --")
+        self.lbl_countdown.setMinimumWidth(145)
+        self.btn_toggle_vis=QPushButton("👁️ 隐藏识别框")
+        self.btn_settings=QPushButton("⚙ 设置")
+        self.btn_toggle_vis.clicked.connect(on_hide_show)
+        self.btn_settings.clicked.connect(on_settings)
+        layout.addWidget(self.lbl_countdown)
+        layout.addWidget(self.btn_toggle_vis)
+        layout.addWidget(self.btn_settings)
+        self.adjustSize()
+
+    def set_countdown(self, text):
+        self.lbl_countdown.setText(text)
+        self.adjustSize()
+
+    def set_visibility_text(self, visible):
+        self.btn_toggle_vis.setText("👁️ 隐藏识别框" if visible else "👁️ 显示识别框")
+        self.adjustSize()
+
+    def set_settings_text(self, opened):
+        self.btn_settings.setText("✕ 收起" if opened else "⚙ 设置")
+        self.adjustSize()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            child=self.childAt(event.position().toPoint())
+            if child in (self.btn_toggle_vis, self.btn_settings):
+                return super().mousePressEvent(event)
+            self._dragging=True
+            self._drag_offset=event.position().toPoint()
+            self.raise_()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and self._drag_offset is not None:
+            parent=self.parentWidget()
+            if parent:
+                p=self.mapToParent(event.position().toPoint()-self._drag_offset)
+                x=max(0,min(p.x(), max(0,parent.width()-self.width())))
+                y=max(0,min(p.y(), max(0,parent.height()-self.height())))
+                self.move(x,y)
+                self.moved.emit()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging=False
+            self._drag_offset=None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 # ==================== 7. 主窗口核心业务逻辑 ====================
@@ -686,15 +732,13 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("系统就绪")
         left_layout.addWidget(self.status_label)
 
-        # ---------- 右上角设置按钮 ----------
-        self.settings_btn = QPushButton("⚙ 设置", central)
-        self.settings_btn.setFixedSize(82, 34)
-        self.settings_btn.setStyleSheet("""
-            QPushButton { background-color: #181825; color: #ffffff; border: 1px solid #45475a; border-radius: 6px; font-weight: bold; padding: 4px 8px; }
-            QPushButton:hover { background-color: #313244; }
-        """)
-        self.settings_btn.clicked.connect(self.toggle_settings_panel)
-        self.settings_btn.show()
+        # ---------- 右上角最上层浮动控制栏 ----------
+        self.settings_open = False
+        self.control_bar_user_moved = False
+        self.control_bar = FloatingControlBar(central, self.toggle_overlay_visibility, self.toggle_settings_panel)
+        self.control_bar.moved.connect(lambda: setattr(self, "control_bar_user_moved", True))
+        self.control_bar.show()
+        self.control_bar.raise_()
 
         # ---------- 右侧：浏览器 ----------
         self.webview = QWebEngineView()
@@ -707,9 +751,8 @@ class MainWindow(QMainWindow):
         # 网页始终占满整个窗口；设置面板作为右侧浮层覆盖在网页上，不压缩网页显示区域。
         main_layout.addWidget(self.webview, stretch=1)
         self.left_panel.setParent(central)
-        self.settings_open = False
         self.left_panel.hide()
-        self.settings_btn.raise_()
+        self.control_bar.raise_()
 
         # ---------- 定时器与 Overlay ----------
         self.refresh_clock = QTimer()
@@ -744,7 +787,7 @@ class MainWindow(QMainWindow):
         self.refresh_ip_list()
         self.update_top_right_countdown_bar()
         
-        self.log("🚀 系统初始化完成 (V15.1 - 右上角设置版)")
+        self.log("🚀 系统初始化完成 (V16.0 - 可拖拽最上层控制栏版)")
         if self.config["url"]:
             self.load_page()
 
@@ -754,12 +797,17 @@ class MainWindow(QMainWindow):
             h = self.centralWidget().height()
             w = self.left_panel.width() if hasattr(self, "left_panel") else 360
             self.left_panel.setGeometry(max(0, self.centralWidget().width() - w), 48, w, max(0, h - 48))
-        if hasattr(self, "settings_btn"):
-            self.settings_btn.move(max(0, self.centralWidget().width() - self.settings_btn.width() - 10), 8)
+        if hasattr(self, "control_bar"):
+            if not getattr(self, "control_bar_user_moved", False):
+                self.control_bar.adjustSize()
+                self.control_bar.move(max(0, self.centralWidget().width() - self.control_bar.width() - 10), 8)
+            self.control_bar.raise_()
         if hasattr(self, "roi_overlay"):
             self.roi_overlay.setGeometry(self.webview.rect())
             self.roi_overlay.raise_()
             self.update_alarm_buttons()
+            if hasattr(self, "control_bar"):
+                self.control_bar.raise_()
 
     def eventFilter(self, obj, event):
         if hasattr(self, "webview") and obj is self.webview:
@@ -834,19 +882,22 @@ class MainWindow(QMainWindow):
         script.setRunsOnSubFrames(True)
         self.webview.page().profile().scripts().insert(script)
 
+    def toggle_overlay_visibility(self):
+        self.roi_overlay.toggle_boxes_visibility()
+        self.control_bar.set_visibility_text(self.roi_overlay.boxes_visible)
+        self.control_bar.raise_()
+
     def toggle_settings_panel(self):
         if self.is_fullscreen:
             return
         self.settings_open = not getattr(self, "settings_open", False)
         self.left_panel.setVisible(self.settings_open)
+        self.control_bar.set_settings_text(self.settings_open)
         if self.settings_open:
             self.left_panel.raise_()
-            self.settings_btn.raise_()
-            self.settings_btn.setText("✕ 收起")
-        else:
-            self.settings_btn.setText("⚙ 设置")
-        self.roi_overlay.raise_()
-        self.settings_btn.raise_()
+        if hasattr(self, "roi_overlay"):
+            self.roi_overlay.raise_()
+        self.control_bar.raise_()
 
     def on_zoom_changed(self, value):
         factor = value / 100.0
@@ -868,7 +919,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self.paste_credentials)
 
     def start_roi_selection(self):
-        self.log("提示：请点击网页右上角“⚙️ 调整识别框”进行框选")
+        self.log("提示：进入网页内识别框调整模式")
         self.roi_overlay.start_editing(self.roi_list)
 
     def clear_all_rois(self):
@@ -963,6 +1014,8 @@ class MainWindow(QMainWindow):
         text = f"⏱️ 刷新: {refresh_str} | OCR检测: {roi_str}"
         if hasattr(self, 'roi_overlay') and self.roi_overlay:
             self.roi_overlay.update_countdown_text(text)
+        if hasattr(self, "control_bar"):
+            self.control_bar.set_countdown(text)
 
     def segment_rows(self, img_bgr):
         h_img, w_img = img_bgr.shape[:2]
@@ -1315,12 +1368,12 @@ class MainWindow(QMainWindow):
     def toggle_fullscreen(self):
         if self.is_fullscreen:
             self.showNormal()
-            self.settings_btn.show()
+            self.control_bar.show()
             self.is_fullscreen = False
         else:
             self.left_panel.hide()
             self.settings_open = False
-            self.settings_btn.hide()
+            self.control_bar.hide()
             self.showFullScreen()
             self.is_fullscreen = True
 
