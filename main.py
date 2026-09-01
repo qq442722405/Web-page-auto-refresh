@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V17.0 - 长时间运行稳定版)
+网页刷新数字监控 (V19.0 - 长时间稳定运行版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
@@ -624,6 +624,13 @@ class OCRWorker(QObject):
             self.finished.emit(results, None)
         except Exception as e:
             self.finished.emit(None, str(e))
+        finally:
+            # 明确释放本轮 PNG bytes 引用，避免长期运行时任务对象残留。
+            try:
+                jobs = None
+                results = None
+            except Exception:
+                pass
 
 
 class _OCRRequestProxy(QObject):
@@ -895,12 +902,37 @@ class MainWindow(QMainWindow):
         self.control_bar.raise_()
 
         # ---------- 右侧：浏览器 ----------
+        # WebEngine 长时间运行优化：禁用 HTTP 磁盘缓存，保留 Cookie，避免反复 reload 后缓存持续膨胀。
+        try:
+            from PySide6.QtWebEngineCore import QWebEngineProfile
+            profile = QWebEngineProfile.defaultProfile()
+            profile.setHttpCacheType(QWebEngineProfile.NoCache)
+            profile.setPersistentCookiesPolicy(QWebEngineProfile.AllowPersistentCookies)
+            _write_runtime_log("WebEngine缓存策略：NoCache，Cookie保持持久化")
+        except Exception as e:
+            _write_runtime_log(f"WebEngine缓存策略设置失败: {e}", "WARN")
+
         self.webview = QWebEngineView()
+        self.web_loading = False
+        self.last_reload_time = 0.0
+        self.reload_in_progress_count = 0
         self.custom_page = CustomWebPage(self.webview)
         self.webview.setPage(self.custom_page)
         self.webview.setZoomFactor(self.config.get("zoom_level", 1.0))
+        # 长时间运行稳定性：减少 Chromium/GPU 合成导致的底层闪退风险。
+        try:
+            settings = self.webview.settings()
+            from PySide6.QtWebEngineCore import QWebEngineSettings
+            settings.setAttribute(QWebEngineSettings.Accelerated2dCanvasEnabled, False)
+            settings.setAttribute(QWebEngineSettings.WebGLEnabled, False)
+        except Exception as e:
+            _write_runtime_log(f"WebEngine稳定性设置失败: {e}", "WARN")
         self.setup_user_script()
+        self.webview.loadStarted.connect(self.on_load_started)
         self.webview.loadFinished.connect(self.on_load_finished)
+        self.web_load_watchdog = QTimer(self)
+        self.web_load_watchdog.setSingleShot(True)
+        self.web_load_watchdog.timeout.connect(self.on_web_load_timeout)
 
         # 网页始终占满整个窗口；设置面板作为右侧浮层覆盖在网页上，不压缩网页显示区域。
         main_layout.addWidget(self.webview, stretch=1)
@@ -964,7 +996,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "roi_overlay"):
             self.roi_overlay.setGeometry(self.webview.rect())
             self.roi_overlay.raise_()
-            self.update_alarm_buttons()
             if hasattr(self, "control_bar"):
                 self.control_bar.raise_()
 
@@ -1084,11 +1115,31 @@ class MainWindow(QMainWindow):
         self.log(f"🌐 正在加载页面: {url}")
         self.webview.load(QUrl(url))
 
+    def on_load_started(self):
+        self.web_loading = True
+        self.reload_in_progress_count += 1
+        if hasattr(self, "web_load_watchdog"):
+            self.web_load_watchdog.start(45000)
+        _write_runtime_log(f"WebEngine开始加载 | 连续加载计数={self.reload_in_progress_count}")
+
+    def on_web_load_timeout(self):
+        if self.web_loading:
+            _write_runtime_log("WebEngine加载超过45秒，标记为异常并跳过本轮刷新，避免刷新循环", "WARN")
+            self.web_loading = False
+            self.reload_in_progress_count = 0
+
     def on_load_finished(self, ok):
+        self.web_loading = False
+        if hasattr(self, "web_load_watchdog"):
+            self.web_load_watchdog.stop()
+        self.reload_in_progress_count = 0
         if ok:
             self.log("✅ 页面加载完毕")
             self.webview.page().runJavaScript(INJECT_SCRIPT)
             QTimer.singleShot(1500, self.paste_credentials)
+        else:
+            self.log("⚠️ 页面加载失败，将等待下一次刷新")
+            _write_runtime_log("WebEngine loadFinished=False", "WARN")
 
     def start_roi_selection(self):
         self.log("提示：进入网页内识别框调整模式")
@@ -1197,6 +1248,7 @@ class MainWindow(QMainWindow):
             _write_runtime_log(
                 f"心跳诊断 | 内存={mem_text} | OCR忙碌={self.ocr_busy} | "
                 f"定时OCR={self.roi_clock_timer.isActive()} | 定时刷新={self.refresh_clock.isActive()} | "
+                f"网页加载中={getattr(self, 'web_loading', False)} | 连续加载计数={getattr(self, 'reload_in_progress_count', 0)} | "
                 f"ROI数量={len(self.roi_list)} | URL={url}"
             )
         except Exception as e:
@@ -1523,8 +1575,25 @@ class MainWindow(QMainWindow):
         self.status_label.setText("设置已保存")
 
     def refresh_page(self):
-        self.log("🔄 触发网页刷新...")
-        self.webview.reload()
+        # 长时间运行保护：页面正在加载时不重复 reload；两次 reload 至少间隔 5 秒。
+        now = time.monotonic()
+        if self.web_loading:
+            self.log("⏭️ 跳过网页刷新：上一轮页面仍在加载")
+            return False
+        if now - self.last_reload_time < 5.0:
+            self.log("⏭️ 跳过网页刷新：刷新过于频繁")
+            return False
+        try:
+            self.last_reload_time = now
+            self.web_loading = True
+            self.log("🔄 触发网页刷新...")
+            self.webview.reload()
+            return True
+        except Exception as e:
+            self.web_loading = False
+            _log_exception("网页刷新异常", e)
+            self.log(f"❌ 网页刷新异常: {e}")
+            return False
 
     def on_auto_refresh_changed(self, state):
         if self.auto_refresh_cb.isChecked(): self.start_auto_timer()
@@ -1578,30 +1647,31 @@ class MainWindow(QMainWindow):
         self.quit_app()
 
     def quit_app(self):
-        if hasattr(self, 'refresh_clock'): self.refresh_clock.stop()
-        if hasattr(self, 'ocr_thread') and self.ocr_thread.isRunning():
-            self.ocr_thread.quit()
-            self.ocr_thread.wait(2000)
-        if hasattr(self, 'roi_clock_timer'): self.roi_clock_timer.stop()
-        if hasattr(self, 'alarm_loop_timer'): self.alarm_loop_timer.stop()
-        if hasattr(self, 'diagnostic_timer'): self.diagnostic_timer.stop()
-        _write_runtime_log("程序正常执行退出流程")
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
+        _write_runtime_log("程序开始执行正常退出流程")
         try:
-            if _faulthandler_file:
-                _faulthandler_file.flush()
-        except Exception:
-            pass
-        self.tray.hide()
-        QApplication.quit()
-        try:
-            current_pid = os.getpid()
-            if sys.platform == "win32":
-                subprocess.Popen(f"taskkill /F /T /PID {current_pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                import signal
-                os.killpg(os.getpgrp(), signal.SIGKILL)
-        except: pass
-        os._exit(0)
+            if hasattr(self, 'refresh_clock'): self.refresh_clock.stop()
+            if hasattr(self, 'ocr_thread') and self.ocr_thread.isRunning():
+                self.ocr_thread.quit()
+                if not self.ocr_thread.wait(3000):
+                    _write_runtime_log("OCR线程未在3秒内结束，交给Qt继续退出", "WARN")
+            if hasattr(self, 'roi_clock_timer'): self.roi_clock_timer.stop()
+            if hasattr(self, 'alarm_loop_timer'): self.alarm_loop_timer.stop()
+            if hasattr(self, 'diagnostic_timer'): self.diagnostic_timer.stop()
+            self.stop_alarm_audio()
+            if hasattr(self, 'tray'): self.tray.hide()
+            try:
+                if _faulthandler_file:
+                    _faulthandler_file.flush()
+            except Exception:
+                pass
+            _write_runtime_log("程序正常执行退出流程完成")
+            QApplication.quit()
+        except Exception as e:
+            _log_exception("程序退出流程异常", e)
+            QApplication.quit()
 
 
 # ==================== 8. JS 自动填表与即时回车脚本 ====================
@@ -1679,7 +1749,10 @@ INJECT_SCRIPT = r"""
 if __name__ == "__main__":
     try:
         _write_runtime_log("开始创建 QApplication")
-        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--ignore-certificate-errors")
+        # 长时间运行稳定性：关闭 GPU 合成，避免部分 Windows/显卡驱动下 QWebEngine 长时间运行后崩溃。
+        flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        stable_flags = "--ignore-certificate-errors --disable-gpu --disable-gpu-compositing --disable-features=RendererCodeIntegrity"
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (flags + " " + stable_flags).strip()
     except Exception as e:
         _log_exception("启动环境初始化异常", e)
     app = QApplication(sys.argv)
