@@ -1,24 +1,19 @@
-# 网页刷新数字监控 V19.1
+# 网页刷新数字监控 V20.1
 
-本版本重点修复 **Windows EXE 打包后提示“未安装 ddddocr”**的问题。
+本版本为 PyInstaller `--onedir` 分目录版，解决 GitHub Actions 验证路径错误。
 
-## ddddocr 修复
+## 打包结果
 
-GitHub Actions 打包时会：
+PyInstaller 使用 `--onedir` 后，EXE 位于：
 
-1. 安装固定版本 `ddddocr==1.6.1`；
-2. 安装 `onnxruntime`；
-3. 打包前实际初始化 `ddddocr.DdddOcr()` 做模型自检；
-4. PyInstaller 使用 `--collect-all ddddocr` 把 `.onnx` 模型文件一起打入 EXE；
-5. 同时收集 ONNX Runtime 的模块和二进制文件；
-6. 最终检查 EXE 是否生成。
+`dist/网页刷新数字监控/网页刷新数字监控.exe`
 
-这样不会再出现 Python 环境明明安装了 ddddocr，但 onefile EXE 内缺少 `common.onnx/common_old.onnx` 等模型文件的问题。
+不能使用 `dist/网页刷新数字监控.exe` 判断文件是否存在。
 
-## 打包
+## ddddocr 模型
 
-GitHub Actions 现在保持 **手动触发**：Actions → Windows EXE 手动打包 → Run workflow。
+工程代码不要求根目录存在 `models` 文件夹。GitHub Actions 使用 `--collect-all ddddocr`，会把 ddddocr 包内的数据和模型一起收集到打包目录。
 
-## 日志
+## GitHub Actions
 
-程序目录会生成 `日志.TXT`。如果 ddddocr 导入失败，日志会记录实际异常原因，而不再简单显示“未安装”。
+仅支持手动触发：`workflow_dispatch`。
