@@ -29,7 +29,7 @@ jobs:
       - name: Build EXE with ddddocr models and ONNX Runtime
         shell: cmd
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name "网页刷新数字监控" --icon=1.ico ^
+          pyinstaller --noconfirm --clean --onedir --windowed --name "网页刷新数字监控" --icon=1.ico ^
             --collect-all ddddocr ^
             --collect-all onnxruntime ^
             --copy-metadata ddddocr ^
@@ -48,5 +48,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 网页刷新数字监控-Windows
-          path: dist/网页刷新数字监控.exe
+          name: 网页刷新数字监控-Windows-目录版
+          path: dist/网页刷新数字监控
