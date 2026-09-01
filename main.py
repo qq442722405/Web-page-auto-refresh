@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V19.0 - 长时间稳定运行版)
+网页刷新数字监控 (V19.1 - ddddocr打包修复版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
@@ -36,7 +36,7 @@ try:
     HAS_DDDDOCR = True
 except Exception as e:
     HAS_DDDDOCR = False
-    DDDDOCR_ERR_MSG = str(e)
+    DDDDOCR_ERR_MSG = "".join(traceback.format_exception_only(type(e), e)).strip()
 
 # ==================== 2. PySide6 核心组件导入 ====================
 from PySide6.QtCore import QUrl, Qt, QTimer, QDateTime, QRect, QPoint, Signal, QEvent, QObject, QThread, Slot
@@ -1170,7 +1170,7 @@ class MainWindow(QMainWindow):
     def on_manual_detect_clicked(self):
         self.log("👆 触发【手动检测】...")
         if not HAS_DDDDOCR or self.ocr is None:
-            msg = f"❌ 缺失 ddddocr 模块 (原因: {DDDDOCR_ERR_MSG or '未初始化'})"
+            msg = f"❌ ddddocr 不可用 ({DDDDOCR_ERR_MSG or "未初始化"})"
             self.roi_status_label.setText(f"状态: {msg}")
             self.log(msg)
             return
@@ -1197,7 +1197,7 @@ class MainWindow(QMainWindow):
             self.log("⏹️ 定时检测已停止")
         else:
             if not HAS_DDDDOCR or self.ocr is None:
-                err = DDDDOCR_ERR_MSG or "未安装 ddddocr 依赖"
+                err = DDDDOCR_ERR_MSG or "ddddocr 导入失败或模型文件缺失"
                 self.roi_status_label.setText(f"❌ 缺失 ddddocr 模块 ({err})")
                 self.log(f"❌ 开启失败: {err}")
                 return
