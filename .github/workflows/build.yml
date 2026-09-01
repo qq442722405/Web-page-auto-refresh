@@ -32,8 +32,6 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed --name "网页刷新数字监控" --icon=1.ico ^
             --collect-all ddddocr ^
             --collect-all onnxruntime ^
-            --collect-submodules ddddocr ^
-            --collect-submodules onnxruntime ^
             --copy-metadata ddddocr ^
             --copy-metadata onnxruntime ^
             --hidden-import=onnxruntime ^
