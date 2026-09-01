@@ -17,12 +17,35 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
 
-      - name: Build EXE
+      - name: Verify ddddocr before packaging
+        shell: cmd
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name "网页刷新数字监控" --icon=1.ico main.py
+          python -c "import ddddocr, onnxruntime, os; print('ddddocr=', ddddocr.__version__ if hasattr(ddddocr,'__version__') else 'OK'); print('onnxruntime=', onnxruntime.__version__)"
+          python -c "import ddddocr; o=ddddocr.DdddOcr(show_ad=False); print('ddddocr model initialization: OK')"
+
+      - name: Build EXE with ddddocr models and ONNX Runtime
+        shell: cmd
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name "网页刷新数字监控" --icon=1.ico ^
+            --collect-all ddddocr ^
+            --collect-all onnxruntime ^
+            --collect-submodules ddddocr ^
+            --collect-submodules onnxruntime ^
+            --copy-metadata ddddocr ^
+            --copy-metadata onnxruntime ^
+            --hidden-import=onnxruntime ^
+            --hidden-import=onnxruntime.capi.onnxruntime_pybind11_state ^
+            --hidden-import=ddddocr ^
+            main.py
+
+      - name: Verify packaged EXE exists
+        shell: cmd
+        run: |
+          if not exist "dist\网页刷新数字监控.exe" exit /b 1
+          dir "dist\网页刷新数字监控.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
