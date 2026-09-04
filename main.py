@@ -167,6 +167,13 @@ def load_config():
         "roi_multiplier": 1,
         "target_same_count": 3,
         "target_value": "",
+        "web_slim_mode": False,
+        "slim_images": False,
+        "slim_fonts": False,
+        "slim_media": False,
+        "slim_plugins": True,
+        "slim_animations": False,
+        "slim_trackers": False,
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -505,8 +512,56 @@ class QRDialog(QDialog):
         layout.addWidget(close_btn)
 
 
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineCertificateError, QWebEngineScript
+from PySide6.QtWebEngineCore import (
+    QWebEnginePage, QWebEngineCertificateError, QWebEngineScript,
+    QWebEngineUrlRequestInterceptor
+)
 from PySide6.QtWebEngineWidgets import QWebEngineView
+
+class SlimRequestInterceptor(QWebEngineUrlRequestInterceptor):
+    """可选的网页资源精简器。默认不拦截核心脚本，只按用户勾选的资源类型处理。"""
+    def __init__(self, owner=None):
+        super().__init__(owner)
+        self.owner = owner
+        self.enabled = False
+        self.block_images = False
+        self.block_fonts = False
+        self.block_media = False
+        self.block_trackers = False
+        self.tracker_words = (
+            "google-analytics", "googletagmanager", "doubleclick", "googlesyndication",
+            "facebook.net", "connect.facebook", "clarity.ms", "hotjar", "matomo",
+            "umeng", "cnzz", "baidu.com/hm.gif"
+        )
+
+    def update_options(self, enabled, images, fonts, media, trackers):
+        self.enabled = bool(enabled)
+        self.block_images = bool(images)
+        self.block_fonts = bool(fonts)
+        self.block_media = bool(media)
+        self.block_trackers = bool(trackers)
+
+    def interceptRequest(self, info):
+        if not self.enabled:
+            return
+        try:
+            url = info.requestUrl().toString().lower()
+            rtype = str(info.resourceType()).lower()
+            if self.block_trackers and any(w in url for w in self.tracker_words):
+                info.block(True)
+                return
+            if self.block_images and ("image" in rtype or rtype.endswith("image")):
+                info.block(True)
+                return
+            if self.block_fonts and "font" in rtype:
+                info.block(True)
+                return
+            if self.block_media and ("media" in rtype or "audio" in rtype or "video" in rtype):
+                info.block(True)
+                return
+        except Exception:
+            return
+
 
 class CustomWebPage(QWebEnginePage):
     def certificateError(self, error: QWebEngineCertificateError) -> bool:
@@ -644,7 +699,7 @@ class _OCRRequestProxy(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V17.0 - 长时间运行稳定版)")
+        self.setWindowTitle("网页刷新数字监控 (V21.0 - Chromium网页精简版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -746,6 +801,34 @@ class MainWindow(QMainWindow):
         g_url.addWidget(self.countdown_label)
 
         self.combined_panel.container_layout.addWidget(grp_url)
+
+        # 1.5 Chromium/网页精简设置（QWebEngine 使用 Chromium 内核）
+        grp_slim = QGroupBox("⚡ 网页精简（Chromium 内核）")
+        g_slim = QVBoxLayout(grp_slim)
+        self.slim_enable_cb = QCheckBox("启用网页精简模式")
+        self.slim_enable_cb.setChecked(bool(self.config.get("web_slim_mode", False)))
+        g_slim.addWidget(self.slim_enable_cb)
+        self.slim_images_cb = QCheckBox("关闭图片加载（可明显减少流量/内存）")
+        self.slim_fonts_cb = QCheckBox("关闭网页字体加载（可能改变字体样式）")
+        self.slim_media_cb = QCheckBox("关闭音频/视频资源")
+        self.slim_plugins_cb = QCheckBox("关闭插件")
+        self.slim_animations_cb = QCheckBox("关闭网页动画/CSS过渡")
+        self.slim_trackers_cb = QCheckBox("拦截常见统计/广告跟踪请求")
+        self.slim_images_cb.setChecked(bool(self.config.get("slim_images", False)))
+        self.slim_fonts_cb.setChecked(bool(self.config.get("slim_fonts", False)))
+        self.slim_media_cb.setChecked(bool(self.config.get("slim_media", False)))
+        self.slim_plugins_cb.setChecked(bool(self.config.get("slim_plugins", True)))
+        self.slim_animations_cb.setChecked(bool(self.config.get("slim_animations", False)))
+        self.slim_trackers_cb.setChecked(bool(self.config.get("slim_trackers", False)))
+        for cb in (self.slim_images_cb, self.slim_fonts_cb, self.slim_media_cb, self.slim_plugins_cb, self.slim_animations_cb, self.slim_trackers_cb):
+            g_slim.addWidget(cb)
+            cb.toggled.connect(self.apply_web_optimization)
+        self.slim_enable_cb.toggled.connect(self.apply_web_optimization)
+        tip = QLabel("说明：保留 JavaScript，避免破坏监控网页功能；勾选项目后通常需重新加载网页。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#94a3b8;font-size:10px;")
+        g_slim.addWidget(tip)
+        self.combined_panel.container_layout.addWidget(grp_slim)
 
         # 2. 账号密码
         grp_auth = QGroupBox("二. 账号密码")
@@ -904,13 +987,16 @@ class MainWindow(QMainWindow):
         # ---------- 右侧：浏览器 ----------
         # WebEngine 长时间运行优化：禁用 HTTP 磁盘缓存，保留 Cookie，避免反复 reload 后缓存持续膨胀。
         try:
-            from PySide6.QtWebEngineCore import QWebEngineProfile
+            from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
             profile = QWebEngineProfile.defaultProfile()
-            profile.setHttpCacheType(QWebEngineProfile.NoCache)
+            profile.setHttpCacheType(QWebEngineProfile.MemoryHttpCache)
             profile.setPersistentCookiesPolicy(QWebEngineProfile.AllowPersistentCookies)
-            _write_runtime_log("WebEngine缓存策略：NoCache，Cookie保持持久化")
+            self.slim_interceptor = SlimRequestInterceptor(profile)
+            profile.setUrlRequestInterceptor(self.slim_interceptor)
+            _write_runtime_log("WebEngine：Chromium/QWebEngine，缓存=MemoryHttpCache，Cookie持久化")
         except Exception as e:
-            _write_runtime_log(f"WebEngine缓存策略设置失败: {e}", "WARN")
+            self.slim_interceptor = None
+            _write_runtime_log(f"WebEngine优化器初始化失败: {e}", "WARN")
 
         self.webview = QWebEngineView()
         self.web_loading = False
@@ -922,12 +1008,14 @@ class MainWindow(QMainWindow):
         # 长时间运行稳定性：减少 Chromium/GPU 合成导致的底层闪退风险。
         try:
             settings = self.webview.settings()
-            from PySide6.QtWebEngineCore import QWebEngineSettings
             settings.setAttribute(QWebEngineSettings.Accelerated2dCanvasEnabled, False)
             settings.setAttribute(QWebEngineSettings.WebGLEnabled, False)
+            settings.setAttribute(QWebEngineSettings.FullScreenSupportEnabled, False)
+            settings.setAttribute(QWebEngineSettings.PlaybackRequiresUserGesture, True)
         except Exception as e:
             _write_runtime_log(f"WebEngine稳定性设置失败: {e}", "WARN")
         self.setup_user_script()
+        self.apply_web_optimization(reload_page=False)
         self.webview.loadStarted.connect(self.on_load_started)
         self.webview.loadFinished.connect(self.on_load_finished)
         self.web_load_watchdog = QTimer(self)
@@ -1107,6 +1195,40 @@ class MainWindow(QMainWindow):
         self.webview.setZoomFactor(factor)
         self.config["zoom_level"] = factor
 
+    def apply_web_optimization(self, checked=None, reload_page=True):
+        """应用用户选择的网页精简选项；不关闭核心 JavaScript。"""
+        try:
+            enabled = self.slim_enable_cb.isChecked()
+            images = self.slim_images_cb.isChecked()
+            fonts = self.slim_fonts_cb.isChecked()
+            media = self.slim_media_cb.isChecked()
+            plugins = self.slim_plugins_cb.isChecked()
+            animations = self.slim_animations_cb.isChecked()
+            trackers = self.slim_trackers_cb.isChecked()
+            self.config.update({
+                "web_slim_mode": enabled, "slim_images": images, "slim_fonts": fonts,
+                "slim_media": media, "slim_plugins": plugins, "slim_animations": animations,
+                "slim_trackers": trackers
+            })
+            settings = self.webview.settings()
+            from PySide6.QtWebEngineCore import QWebEngineSettings
+            settings.setAttribute(QWebEngineSettings.AutoLoadImages, not (enabled and images))
+            settings.setAttribute(QWebEngineSettings.PluginsEnabled, not (enabled and plugins))
+            settings.setAttribute(QWebEngineSettings.PlaybackRequiresUserGesture, True if (enabled and media) else True)
+            if self.slim_interceptor:
+                self.slim_interceptor.update_options(enabled, images, fonts, media, trackers)
+            if enabled and animations:
+                css = "*{animation:none!important;transition:none!important;scroll-behavior:auto!important;}"
+                js = "(function(){var s=document.getElementById('__slim_css__');if(!s){s=document.createElement('style');s.id='__slim_css__';document.documentElement.appendChild(s);}s.textContent=" + json.dumps(css) + ";})();"
+                self.webview.page().runJavaScript(js)
+            else:
+                self.webview.page().runJavaScript("(function(){var s=document.getElementById('__slim_css__');if(s)s.remove();})();")
+            _write_runtime_log(f"网页精简设置 | enabled={enabled}, images={images}, fonts={fonts}, media={media}, plugins={plugins}, animations={animations}, trackers={trackers}")
+            if reload_page and hasattr(self, 'webview') and not self.web_loading:
+                QTimer.singleShot(150, self.refresh_page)
+        except Exception as e:
+            _log_exception("应用网页精简设置异常", e)
+
     def load_page(self):
         url = self.url_input.text().strip()
         if not url: return
@@ -1170,7 +1292,7 @@ class MainWindow(QMainWindow):
     def on_manual_detect_clicked(self):
         self.log("👆 触发【手动检测】...")
         if not HAS_DDDDOCR or self.ocr is None:
-            msg = f"❌ ddddocr 不可用 ({DDDDOCR_ERR_MSG or '未初始化'})"
+            msg = f"❌ ddddocr 不可用 ({DDDDOCR_ERR_MSG or "未初始化"})"
             self.roi_status_label.setText(f"状态: {msg}")
             self.log(msg)
             return
