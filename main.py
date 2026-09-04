@@ -1292,7 +1292,7 @@ class MainWindow(QMainWindow):
     def on_manual_detect_clicked(self):
         self.log("👆 触发【手动检测】...")
         if not HAS_DDDDOCR or self.ocr is None:
-            msg = f"❌ ddddocr 不可用 ({DDDDOCR_ERR_MSG or "未初始化"})"
+            msg = f"❌ ddddocr 不可用 ({DDDDOCR_ERR_MSG or '未初始化'})"
             self.roi_status_label.setText(f"状态: {msg}")
             self.log(msg)
             return
