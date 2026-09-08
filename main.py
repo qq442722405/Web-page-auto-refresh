@@ -156,7 +156,9 @@ def load_config():
         "password": "",
         "zoom_level": 1.0,
         "auto_refresh": False,
-        "auto_interval": 60,
+        "operation_interval": 60,
+        "operation_action": "refresh",
+        "operation_point": None,
         "panel_collapsed": False,
         "screenshot_path": os.getcwd(),
         "selected_ip": "",
@@ -536,7 +538,7 @@ class FloatingControlBar(QWidget):
         layout=QHBoxLayout(self)
         layout.setContentsMargins(7,4,7,4)
         layout.setSpacing(5)
-        self.lbl_countdown=QLabel("⏱️ 刷新: -- | 识别: --")
+        self.lbl_countdown=QLabel("⏱️ 操作: -- | 识别: --")
         self.lbl_countdown.setMinimumWidth(145)
         self.btn_toggle_vis=QPushButton("👁️ 隐藏识别框")
         self.btn_settings=QPushButton("⚙ 设置")
@@ -646,9 +648,11 @@ class _OCRRequestProxy(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V22.0 - Chromium内核版)")
+        self.setWindowTitle("网页刷新数字监控 (V24.0 - Chromium高性能版)")
         self.resize(1380, 880)
         self.config = load_config()
+        self.operation_point = self.config.get("operation_point")
+        self.point_pick_mode = False
 
         if os.path.exists("1.ico"):
             self.setWindowIcon(QIcon("1.ico"))
@@ -700,8 +704,8 @@ class MainWindow(QMainWindow):
         # 折叠面板组件
         self.combined_panel = CombinedCollapsiblePanel()
         
-        # 1. 页面设置与刷新
-        grp_url = QGroupBox("一. 页面设置与刷新")
+        # 1. 页面设置
+        grp_url = QGroupBox("一. 页面设置")
         g_url = QVBoxLayout(grp_url)
         
         h_url = QHBoxLayout()
@@ -727,40 +731,48 @@ class MainWindow(QMainWindow):
         h_opts.addWidget(self.zoom_spin)
         h_opts.addWidget(QLabel("%"))
 
-        h_opts.addWidget(QLabel("刷新间隔:"))
+        h_opts.addWidget(QLabel("操作间隔:"))
         self.auto_interval = QSpinBox()
         self.auto_interval.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.auto_interval.setRange(1, 3600)
-        self.auto_interval.setValue(self.config.get("auto_interval", 60))
+        self.auto_interval.setValue(self.config.get("operation_interval", self.config.get("auto_interval", 60)))
         self.auto_interval.setFixedWidth(45)
         self.auto_interval.valueChanged.connect(self.update_auto_interval)
         h_opts.addWidget(self.auto_interval)
         h_opts.addWidget(QLabel("s"))
         
-        self.auto_refresh_cb = QCheckBox("自动")
+        self.auto_refresh_cb = QCheckBox("启用操作")
+        self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
         self.auto_refresh_cb.stateChanged.connect(self.on_auto_refresh_changed)
         h_opts.addWidget(self.auto_refresh_cb)
 
         g_url.addLayout(h_opts)
+
+        h_action = QHBoxLayout()
+        h_action.addWidget(QLabel("到时间后:"))
+        self.operation_action_combo = QComboBox()
+        self.operation_action_combo.addItem("刷新页面", "refresh")
+        self.operation_action_combo.addItem("点击拾取点位", "click")
+        current_action = self.config.get("operation_action", "refresh")
+        idx = self.operation_action_combo.findData(current_action)
+        self.operation_action_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.operation_action_combo.currentIndexChanged.connect(self.on_operation_action_changed)
+        h_action.addWidget(self.operation_action_combo, 1)
+        self.pick_point_btn = QPushButton("📍 拾取点位")
+        self.pick_point_btn.clicked.connect(self.start_point_pick)
+        h_action.addWidget(self.pick_point_btn)
+        g_url.addLayout(h_action)
+
+        self.operation_point_label = QLabel(self.format_operation_point())
+        self.operation_point_label.setStyleSheet("color:#38bdf8;font-size:10px;")
+        self.operation_point_label.setWordWrap(True)
+        g_url.addWidget(self.operation_point_label)
 
         self.countdown_label = QLabel("")
         self.countdown_label.setStyleSheet("color: #0ea5e9; font-weight: bold; font-size: 11px;")
         g_url.addWidget(self.countdown_label)
 
         self.combined_panel.container_layout.addWidget(grp_url)
-
-        # 1.5 浏览器内核
-        grp_engine = QGroupBox("🌐 浏览器内核")
-        g_engine = QVBoxLayout(grp_engine)
-        engine_label = QLabel("Chromium（Google Chrome / Edge 同系列网页内核）")
-        engine_label.setWordWrap(True)
-        engine_label.setStyleSheet("color:#0ea5e9;font-weight:bold;")
-        g_engine.addWidget(engine_label)
-        engine_tip = QLabel("网页使用 Qt WebEngine 的 Chromium 内核渲染，不使用 IE 内核，也不需要单独安装 Chrome。")
-        engine_tip.setWordWrap(True)
-        engine_tip.setStyleSheet("color:#94a3b8;font-size:10px;")
-        g_engine.addWidget(engine_tip)
-        self.combined_panel.container_layout.addWidget(grp_engine)
 
         # 2. 账号密码
         grp_auth = QGroupBox("二. 账号密码")
@@ -927,6 +939,8 @@ class MainWindow(QMainWindow):
             _write_runtime_log(f"Chromium WebEngine 初始化失败: {e}", "WARN")
 
         self.webview = QWebEngineView()
+        self.webview.installEventFilter(self)
+        self.webview.viewport().installEventFilter(self)
         self.web_loading = False
         self.last_reload_time = 0.0
         self.reload_in_progress_count = 0
@@ -1139,7 +1153,7 @@ class MainWindow(QMainWindow):
 
     def on_web_load_timeout(self):
         if self.web_loading:
-            _write_runtime_log("WebEngine加载超过45秒，仍保持加载状态，禁止自动刷新打断页面", "WARN")
+            _write_runtime_log("WebEngine加载超过45秒，仍保持加载状态，禁止自动操作打断页面", "WARN")
             self.reload_in_progress_count = 0
 
     def on_load_finished(self, ok):
@@ -1248,7 +1262,7 @@ class MainWindow(QMainWindow):
     def update_top_right_countdown_bar(self):
         refresh_str = f"{self.remaining_seconds}s" if self.refresh_clock.isActive() else "已停止"
         roi_str = f"{self.roi_remaining_seconds}s" if self.roi_clock_timer.isActive() else "已停止"
-        text = f"⏱️ 刷新: {refresh_str} | OCR检测: {roi_str}"
+        text = f"⏱️ 操作: {refresh_str} | OCR检测: {roi_str}"
         if hasattr(self, 'roi_overlay') and self.roi_overlay:
             self.roi_overlay.update_countdown_text(text)
         if hasattr(self, "control_bar"):
@@ -1574,7 +1588,9 @@ class MainWindow(QMainWindow):
         self.config["password"] = self.config.get("password", "")
         self.config["zoom_level"] = self.zoom_spin.value() / 100.0
         self.config["auto_refresh"] = self.auto_refresh_cb.isChecked()
-        self.config["auto_interval"] = self.auto_interval.value()
+        self.config["operation_interval"] = self.auto_interval.value()
+        self.config["operation_action"] = self.operation_action_combo.currentData()
+        self.config["operation_point"] = self.operation_point
         self.config["selected_ip"] = self.ip_combo.currentText() 
         self.config["reminder_sound_index"] = self.sound_combo.currentIndex()
         self.config["reminder_custom_path"] = self.custom_sound_path
@@ -1589,18 +1605,18 @@ class MainWindow(QMainWindow):
         self.status_label.setText("设置已保存")
 
     def refresh_page(self):
-        # 长时间运行保护：页面正在加载时不重复 reload；两次 reload 至少间隔 5 秒。
+        # 操作间隔到达后执行“刷新页面”动作。页面加载期间不打断。
         now = time.monotonic()
         if self.web_loading:
-            self.log("⏭️ 跳过网页刷新：上一轮页面仍在加载")
+            self.log("⏭️ 跳过刷新：上一轮页面仍在加载")
             return False
         if now - self.last_reload_time < 5.0:
-            self.log("⏭️ 跳过网页刷新：刷新过于频繁")
+            self.log("⏭️ 跳过刷新：操作过于频繁")
             return False
         try:
             self.last_reload_time = now
             self.web_loading = True
-            self.log("🔄 触发网页刷新...")
+            self.log("🔄 执行操作：刷新页面")
             self.webview.reload()
             return True
         except Exception as e:
@@ -1609,33 +1625,103 @@ class MainWindow(QMainWindow):
             self.log(f"❌ 网页刷新异常: {e}")
             return False
 
+    def on_operation_action_changed(self, index):
+        action = self.operation_action_combo.currentData()
+        self.pick_point_btn.setEnabled(action == "click")
+        self.update_operation_point_label()
+        if self.auto_refresh_cb.isChecked():
+            self.start_auto_timer()
+
+    def format_operation_point(self):
+        point = getattr(self, "operation_point", None)
+        if point:
+            return f"当前点击点位：X={point[0]}，Y={point[1]}（网页坐标）"
+        return "当前点击点位：未设置"
+
+    def update_operation_point_label(self):
+        self.operation_point_label.setText(self.format_operation_point())
+
+    def start_point_pick(self):
+        self.point_pick_mode = True
+        self.pick_point_btn.setText("🖱️ 请在网页上点击")
+        self.pick_point_btn.setEnabled(False)
+        self.webview.setCursor(Qt.CrossCursor)
+        self.log("📍 点位拾取模式：请在网页中点击需要自动操作的位置")
+
+    def finish_point_pick(self, pos):
+        self.point_pick_mode = False
+        self.webview.unsetCursor()
+        self.pick_point_btn.setText("📍 拾取点位")
+        self.pick_point_btn.setEnabled(self.operation_action_combo.currentData() == "click")
+        self.operation_point = [int(pos.x()), int(pos.y())]
+        self.config["operation_point"] = self.operation_point
+        self.update_operation_point_label()
+        self.log(f"📍 已拾取操作点位：X={pos.x()}，Y={pos.y()}")
+
+    def perform_operation(self):
+        action = self.operation_action_combo.currentData()
+        if action == "click":
+            if not getattr(self, "operation_point", None):
+                self.log("⚠️ 未设置点击点位，无法执行点击操作")
+                return
+            if self.web_loading:
+                self.log("⏭️ 跳过点击：网页仍在加载")
+                return
+            x, y = self.operation_point
+            # 使用网页 JavaScript 派发真实页面级鼠标事件，不依赖桌面坐标。
+            js = f"""(function(){{
+                const x={int(x)}, y={int(y)};
+                const el=document.elementFromPoint(x,y);
+                if(!el) return false;
+                ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t=>el.dispatchEvent(new MouseEvent(t,{{bubbles:true,cancelable:true,clientX:x,clientY:y,view:window}})));
+                return true;
+            }})()"""
+            self.webview.page().runJavaScript(js, lambda ok: self.log("🖱️ 已执行拾取点位点击" if ok else "⚠️ 点位点击失败：位置无网页元素"))
+        else:
+            self.refresh_page()
+
     def on_auto_refresh_changed(self, state):
-        if self.auto_refresh_cb.isChecked(): self.start_auto_timer()
-        else: self.stop_auto_timer()
+        if self.auto_refresh_cb.isChecked():
+            self.start_auto_timer()
+        else:
+            self.stop_auto_timer()
 
     def update_auto_interval(self):
-        if self.auto_refresh_cb.isChecked(): self.start_auto_timer()
+        if self.auto_refresh_cb.isChecked():
+            self.start_auto_timer()
 
     def start_auto_timer(self):
         self.remaining_seconds = self.auto_interval.value()
         self.refresh_clock.start(1000)
-        self.log(f"⏱️ 自动刷新开启，间隔: {self.remaining_seconds}秒")
+        action_text = "刷新页面" if self.operation_action_combo.currentData() == "refresh" else "点击拾取点位"
+        self.log(f"⏱️ 自动操作开启，间隔: {self.remaining_seconds}秒，动作: {action_text}")
         self.update_top_right_countdown_bar()
 
     def stop_auto_timer(self):
         self.refresh_clock.stop()
         self.countdown_label.setText("")
-        self.log("⏱️ 自动刷新已停止")
+        self.log("⏱️ 自动操作已停止")
         self.update_top_right_countdown_bar()
 
     def on_refresh_clock_tick(self):
         if self.remaining_seconds > 1:
             self.remaining_seconds -= 1
-            self.countdown_label.setText(f"下次刷新: {self.remaining_seconds}秒")
+            self.countdown_label.setText(f"下次操作: {self.remaining_seconds}秒")
         else:
-            self.refresh_page()
+            self.perform_operation()
             self.remaining_seconds = self.auto_interval.value()
         self.update_top_right_countdown_bar()
+
+    def eventFilter(self, obj, event):
+        if getattr(self, "point_pick_mode", False) and obj in (getattr(self, "webview", None), getattr(self, "webview", None).viewport() if getattr(self, "webview", None) else None):
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                # QWebEngineView 坐标与页面坐标可能不同，直接换算到页面视口。
+                page_pos = self.webview.mapFrom(self.webview.viewport(), pos) if obj is self.webview.viewport() else pos
+                self.finish_point_pick(page_pos)
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
