@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V19.1 - ddddocr打包修复版)
+网页刷新数字监控 (V24.0 - 操作间隔版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
-    - ⏱️ 实时显示【网页刷新倒计时】与【OCR检测倒计时】
+    - ⏱️ 实时显示【操作倒计时】与【OCR检测倒计时】
     - 👁️ 一键【隐藏/显示所有识别窗口】
     - ⚙️ 【设置/收起】打开或关闭设置浮层
     - 控制栏位于最上层，可拖拽移动，按钮始终可点击
@@ -156,7 +156,9 @@ def load_config():
         "password": "",
         "zoom_level": 1.0,
         "auto_refresh": False,
-        "auto_interval": 60,
+        "operation_interval": 60,
+        "operation_action": "refresh",
+        "click_point": [],
         "panel_collapsed": False,
         "screenshot_path": os.getcwd(),
         "selected_ip": "",
@@ -251,6 +253,7 @@ class PersistentROIOverlay(QWidget):
     """
     roi_list_selected = Signal(list)
     clear_alarm_requested = Signal(int)
+    point_selected = Signal(QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -259,6 +262,7 @@ class PersistentROIOverlay(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.rects = []
         self.is_editing = False
+        self.is_picking_point = False
         # 非编辑状态下，Overlay 本身不拦截网页鼠标事件，保证网页可以正常点击、滚动、输入。
         # 右上角按钮等子控件仍可正常接收点击。
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -270,7 +274,7 @@ class PersistentROIOverlay(QWidget):
         self.orig_rect = None
         self.current_draw_rect = None
         self.alarm_buttons = {}
-        self.countdown_text = "⏱️ 刷新: -- | OCR检测: --"
+        self.countdown_text = "⏱️ 操作: -- | OCR检测: --"
 
         self.bar = QWidget(self)
         self.bar.setStyleSheet("""
@@ -306,6 +310,21 @@ class PersistentROIOverlay(QWidget):
 
     def toggle_boxes_visibility(self):
         self.boxes_visible=not self.boxes_visible
+        self.update()
+
+    def start_point_picker(self):
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.is_picking_point = True
+        self.is_editing = False
+        self.setCursor(Qt.CrossCursor)
+        self.bar.hide()
+        self.raise_()
+        self.update()
+
+    def finish_point_picker(self):
+        self.is_picking_point = False
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setCursor(Qt.ArrowCursor)
         self.update()
 
     def start_editing(self, existing_rects):
@@ -363,6 +382,11 @@ class PersistentROIOverlay(QWidget):
     def mousePressEvent(self,event):
         if event.button()!=Qt.LeftButton: return
         pos=event.position().toPoint()
+        if self.is_picking_point:
+            screen_pos = self._local_to_screen(pos)
+            self.point_selected.emit(screen_pos)
+            self.finish_point_picker()
+            return
         if not self.is_editing:
             return
         if self.bar.geometry().contains(pos): return
@@ -646,7 +670,7 @@ class _OCRRequestProxy(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V22.0 - Chromium内核版)")
+        self.setWindowTitle("网页刷新数字监控 (V24.0 - 操作间隔版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -676,6 +700,7 @@ class MainWindow(QMainWindow):
 
         saved_roi_list = self.config.get("roi_list", [[100, 100, 300, 200]])
         self.roi_list = [QRect(r[0], r[1], r[2], r[3]) for r in saved_roi_list]
+        self.click_point = list(self.config.get("click_point", []))
 
         # 已记忆消报的数量与组合特征
         self.box_latest_digits = {}
@@ -728,18 +753,19 @@ class MainWindow(QMainWindow):
         h_opts.addWidget(QLabel("%"))
 
         h_opts.addWidget(QLabel("刷新间隔:"))
-        self.auto_interval = QSpinBox()
-        self.auto_interval.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.auto_interval.setRange(1, 3600)
-        self.auto_interval.setValue(self.config.get("auto_interval", 60))
-        self.auto_interval.setFixedWidth(45)
-        self.auto_interval.valueChanged.connect(self.update_auto_interval)
-        h_opts.addWidget(self.auto_interval)
+        h_opts.addWidget(QLabel("操作间隔:"))
+        self.operation_interval = QSpinBox()
+        self.operation_interval.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.operation_interval.setRange(1, 3600)
+        self.operation_interval.setValue(self.config.get("operation_interval", self.config.get("auto_interval", 60)))
+        self.operation_interval.setFixedWidth(55)
+        self.operation_interval.valueChanged.connect(self.update_operation_interval)
+        h_opts.addWidget(self.operation_interval)
         h_opts.addWidget(QLabel("s"))
-        
-        self.auto_refresh_cb = QCheckBox("自动")
-        self.auto_refresh_cb.stateChanged.connect(self.on_auto_refresh_changed)
-        h_opts.addWidget(self.auto_refresh_cb)
+
+        self.auto_operation_cb = QCheckBox("自动操作")
+        self.auto_operation_cb.stateChanged.connect(self.on_auto_operation_changed)
+        h_opts.addWidget(self.auto_operation_cb)
 
         g_url.addLayout(h_opts)
 
@@ -748,19 +774,6 @@ class MainWindow(QMainWindow):
         g_url.addWidget(self.countdown_label)
 
         self.combined_panel.container_layout.addWidget(grp_url)
-
-        # 1.5 浏览器内核
-        grp_engine = QGroupBox("🌐 浏览器内核")
-        g_engine = QVBoxLayout(grp_engine)
-        engine_label = QLabel("Chromium（Google Chrome / Edge 同系列网页内核）")
-        engine_label.setWordWrap(True)
-        engine_label.setStyleSheet("color:#0ea5e9;font-weight:bold;")
-        g_engine.addWidget(engine_label)
-        engine_tip = QLabel("网页使用 Qt WebEngine 的 Chromium 内核渲染，不使用 IE 内核，也不需要单独安装 Chrome。")
-        engine_tip.setWordWrap(True)
-        engine_tip.setStyleSheet("color:#94a3b8;font-size:10px;")
-        g_engine.addWidget(engine_tip)
-        self.combined_panel.container_layout.addWidget(grp_engine)
 
         # 2. 账号密码
         grp_auth = QGroupBox("二. 账号密码")
@@ -862,16 +875,26 @@ class MainWindow(QMainWindow):
         self.roi_toggle_btn.clicked.connect(self.toggle_roi_monitor)
         self.roi_toggle_btn.setStyleSheet("background-color: #10b981; color: white; font-weight: bold;")
         h_roi_cfg.addWidget(self.roi_toggle_btn)
-
-        h_roi_cfg.addWidget(QLabel("检测间隔(刷新倍数):"))
-        self.roi_multiplier_spin = QSpinBox()
-        self.roi_multiplier_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.roi_multiplier_spin.setRange(1, 1000)
-        self.roi_multiplier_spin.setValue(self.config.get("roi_multiplier", 1))
-        self.roi_multiplier_spin.setFixedWidth(35)
-        h_roi_cfg.addWidget(self.roi_multiplier_spin)
-        h_roi_cfg.addWidget(QLabel("倍"))
+        h_roi_cfg.addWidget(QLabel("检测周期跟随操作间隔"))
         g_roi.addLayout(h_roi_cfg)
+
+        h_action = QHBoxLayout()
+        h_action.addWidget(QLabel("到时操作:"))
+        self.operation_action_combo = QComboBox()
+        self.operation_action_combo.addItem("🔄 刷新网页", "refresh")
+        self.operation_action_combo.addItem("🖱️ 点击拾取点位", "click")
+        current_action = self.config.get("operation_action", "refresh")
+        idx = self.operation_action_combo.findData(current_action)
+        if idx >= 0: self.operation_action_combo.setCurrentIndex(idx)
+        h_action.addWidget(self.operation_action_combo, 1)
+        self.pick_point_btn = QPushButton("📍 拾取点位")
+        self.pick_point_btn.clicked.connect(self.start_point_picker)
+        h_action.addWidget(self.pick_point_btn)
+        g_roi.addLayout(h_action)
+
+        self.click_point_label = QLabel(self.format_click_point())
+        self.click_point_label.setStyleSheet("color:#38bdf8;font-size:11px;")
+        g_roi.addWidget(self.click_point_label)
 
         self.roi_countdown_label = QLabel("")
         self.roi_countdown_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
@@ -917,7 +940,7 @@ class MainWindow(QMainWindow):
         self.control_bar.raise_()
 
         # ---------- 右侧：浏览器 ----------
-        # 使用 Qt WebEngine 的 Chromium 内核；保留 Cookie，使用内存缓存，减少长期运行时磁盘缓存膨胀。
+        # 使用 Qt WebEngine 的 Chromium 内核；保留 Cookie 与磁盘缓存。
         try:
             profile = QWebEngineProfile.defaultProfile()
             profile.setHttpCacheType(QWebEngineProfile.DiskHttpCache)
@@ -975,6 +998,7 @@ class MainWindow(QMainWindow):
         self.roi_overlay = PersistentROIOverlay(self.webview)
         self.roi_overlay.roi_list_selected.connect(self.on_roi_list_selected)
         self.roi_overlay.clear_alarm_requested.connect(self.clear_alarm_for_box)
+        self.roi_overlay.point_selected.connect(self.on_point_selected)
         self.roi_overlay.rects = list(self.roi_list)
         self.roi_overlay.setGeometry(self.webview.rect())
         self.roi_overlay.raise_()
@@ -989,7 +1013,7 @@ class MainWindow(QMainWindow):
         self.tray.setContextMenu(tray_menu)
         self.tray.show()
 
-        self.auto_refresh_cb.setChecked(self.config.get("auto_refresh", False))
+        self.auto_operation_cb.setChecked(self.config.get("auto_refresh", False))
         self.refresh_ip_list()
         self.update_top_right_countdown_bar()
         
@@ -1197,9 +1221,7 @@ class MainWindow(QMainWindow):
         self.perform_roi_ocr_check()
 
     def calc_roi_check_interval(self):
-        auto_sec = self.auto_interval.value()
-        mult = self.roi_multiplier_spin.value()
-        return auto_sec * mult + 5
+        return self.operation_interval.value()
 
     def toggle_roi_monitor(self):
         if self.roi_clock_timer.isActive():
@@ -1248,7 +1270,7 @@ class MainWindow(QMainWindow):
     def update_top_right_countdown_bar(self):
         refresh_str = f"{self.remaining_seconds}s" if self.refresh_clock.isActive() else "已停止"
         roi_str = f"{self.roi_remaining_seconds}s" if self.roi_clock_timer.isActive() else "已停止"
-        text = f"⏱️ 刷新: {refresh_str} | OCR检测: {roi_str}"
+        text = f"⏱️ 操作: {refresh_str} | OCR检测: {roi_str}"
         if hasattr(self, 'roi_overlay') and self.roi_overlay:
             self.roi_overlay.update_countdown_text(text)
         if hasattr(self, "control_bar"):
@@ -1573,14 +1595,15 @@ class MainWindow(QMainWindow):
         self.config["account"] = self.config.get("account", "")
         self.config["password"] = self.config.get("password", "")
         self.config["zoom_level"] = self.zoom_spin.value() / 100.0
-        self.config["auto_refresh"] = self.auto_refresh_cb.isChecked()
-        self.config["auto_interval"] = self.auto_interval.value()
+        self.config["auto_refresh"] = self.auto_operation_cb.isChecked()
+        self.config["operation_interval"] = self.operation_interval.value()
+        self.config["operation_action"] = self.operation_action_combo.currentData()
+        self.config["click_point"] = list(self.click_point) if getattr(self, "click_point", None) else []
         self.config["selected_ip"] = self.ip_combo.currentText() 
         self.config["reminder_sound_index"] = self.sound_combo.currentIndex()
         self.config["reminder_custom_path"] = self.custom_sound_path
         
         self.config["roi_list"] = [[r.x(), r.y(), r.width(), r.height()] for r in self.roi_list]
-        self.config["roi_multiplier"] = self.roi_multiplier_spin.value()
         self.config["target_same_count"] = self.target_same_count_spin.value()
         self.config["target_value"] = self.target_value_input.text().strip()
         
@@ -1609,33 +1632,70 @@ class MainWindow(QMainWindow):
             self.log(f"❌ 网页刷新异常: {e}")
             return False
 
-    def on_auto_refresh_changed(self, state):
-        if self.auto_refresh_cb.isChecked(): self.start_auto_timer()
+    def on_auto_operation_changed(self, state):
+        if self.auto_operation_cb.isChecked(): self.start_auto_timer()
         else: self.stop_auto_timer()
 
-    def update_auto_interval(self):
-        if self.auto_refresh_cb.isChecked(): self.start_auto_timer()
+    def update_operation_interval(self):
+        if self.auto_operation_cb.isChecked(): self.start_auto_timer()
 
     def start_auto_timer(self):
-        self.remaining_seconds = self.auto_interval.value()
+        self.remaining_seconds = self.operation_interval.value()
         self.refresh_clock.start(1000)
-        self.log(f"⏱️ 自动刷新开启，间隔: {self.remaining_seconds}秒")
+        self.log(f"⏱️ 自动操作开启，间隔: {self.remaining_seconds}秒")
         self.update_top_right_countdown_bar()
 
     def stop_auto_timer(self):
         self.refresh_clock.stop()
         self.countdown_label.setText("")
-        self.log("⏱️ 自动刷新已停止")
+        self.log("⏹️ 自动操作已停止")
         self.update_top_right_countdown_bar()
 
     def on_refresh_clock_tick(self):
         if self.remaining_seconds > 1:
             self.remaining_seconds -= 1
-            self.countdown_label.setText(f"下次刷新: {self.remaining_seconds}秒")
+            self.countdown_label.setText(f"下次操作: {self.remaining_seconds}秒")
+        else:
+            self.perform_scheduled_operation()
+            self.remaining_seconds = self.operation_interval.value()
+        self.update_top_right_countdown_bar()
+
+    def format_click_point(self):
+        p = getattr(self, "click_point", [])
+        return f"📍 当前点位: ({p[0]}, {p[1]})" if len(p) >= 2 else "📍 当前点位: 未设置"
+
+    def start_point_picker(self):
+        if not hasattr(self, "roi_overlay"):
+            return
+        self.roi_overlay.start_point_picker()
+        self.pick_point_btn.setText("🎯 请在网页上点击...")
+        self.log("📍 已进入点位拾取模式，请在网页上点击需要自动操作的位置")
+
+    def on_point_selected(self, point):
+        self.click_point = [point.x(), point.y()]
+        self.click_point_label.setText(self.format_click_point())
+        self.pick_point_btn.setText("📍 重新拾取点位")
+        self.operation_action_combo.setCurrentIndex(max(0, self.operation_action_combo.findData("click")))
+        self.log(f"📍 已拾取点位: ({point.x()}, {point.y()})")
+        self.status_label.setText(f"已设置点击点位 ({point.x()}, {point.y()})")
+
+    def perform_scheduled_operation(self):
+        action = self.operation_action_combo.currentData()
+        if action == "click":
+            if len(getattr(self, "click_point", [])) < 2:
+                self.log("⚠️ 到时操作选择为点击，但尚未拾取点位")
+                self.status_label.setText("⚠️ 请先拾取点击点位")
+                return
+            try:
+                from PySide6.QtTest import QTest
+                local = self.webview.mapFromGlobal(QPoint(self.click_point[0], self.click_point[1]))
+                QTest.mouseClick(self.webview, Qt.LeftButton, Qt.NoModifier, local)
+                self.log(f"🖱️ 到时执行点击: ({self.click_point[0]}, {self.click_point[1]})")
+            except Exception as e:
+                _log_exception("自动点击异常", e)
+                self.log(f"❌ 自动点击异常: {e}")
         else:
             self.refresh_page()
-            self.remaining_seconds = self.auto_interval.value()
-        self.update_top_right_countdown_bar()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
