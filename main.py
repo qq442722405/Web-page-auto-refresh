@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V24.0 - 操作间隔版)
+网页刷新数字监控 (V24.1 - 操作间隔/可靠点击版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
@@ -383,8 +383,9 @@ class PersistentROIOverlay(QWidget):
         if event.button()!=Qt.LeftButton: return
         pos=event.position().toPoint()
         if self.is_picking_point:
-            screen_pos = self._local_to_screen(pos)
-            self.point_selected.emit(screen_pos)
+            # 保存为网页视图内部坐标，而不是屏幕绝对坐标。
+            # 这样移动软件窗口、调整窗口大小后，仍能点击网页中的同一位置。
+            self.point_selected.emit(QPoint(pos))
             self.finish_point_picker()
             return
         if not self.is_editing:
@@ -670,7 +671,7 @@ class _OCRRequestProxy(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V24.0 - 操作间隔版)")
+        self.setWindowTitle("网页刷新数字监控 (V24.1 - 操作间隔/可靠点击版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -725,8 +726,8 @@ class MainWindow(QMainWindow):
         # 折叠面板组件
         self.combined_panel = CombinedCollapsiblePanel()
         
-        # 1. 页面设置与刷新
-        grp_url = QGroupBox("一. 页面设置与刷新")
+        # 1. 页面设置
+        grp_url = QGroupBox("一. 页面设置")
         g_url = QVBoxLayout(grp_url)
         
         h_url = QHBoxLayout()
@@ -752,7 +753,6 @@ class MainWindow(QMainWindow):
         h_opts.addWidget(self.zoom_spin)
         h_opts.addWidget(QLabel("%"))
 
-        h_opts.addWidget(QLabel("刷新间隔:"))
         h_opts.addWidget(QLabel("操作间隔:"))
         self.operation_interval = QSpinBox()
         self.operation_interval.setButtonSymbols(QAbstractSpinBox.NoButtons)
@@ -768,6 +768,26 @@ class MainWindow(QMainWindow):
         h_opts.addWidget(self.auto_operation_cb)
 
         g_url.addLayout(h_opts)
+
+        # 到时操作紧跟在“操作间隔”下面，便于一眼看到定时执行的动作。
+        h_action = QHBoxLayout()
+        h_action.addWidget(QLabel("到时操作:"))
+        self.operation_action_combo = QComboBox()
+        self.operation_action_combo.addItem("🔄 刷新网页", "refresh")
+        self.operation_action_combo.addItem("🖱️ 点击拾取点位", "click")
+        current_action = self.config.get("operation_action", "refresh")
+        idx = self.operation_action_combo.findData(current_action)
+        if idx >= 0:
+            self.operation_action_combo.setCurrentIndex(idx)
+        h_action.addWidget(self.operation_action_combo, 1)
+        self.pick_point_btn = QPushButton("📍 拾取点位")
+        self.pick_point_btn.clicked.connect(self.start_point_picker)
+        h_action.addWidget(self.pick_point_btn)
+        g_url.addLayout(h_action)
+
+        self.click_point_label = QLabel(self.format_click_point())
+        self.click_point_label.setStyleSheet("color:#38bdf8;font-size:11px;")
+        g_url.addWidget(self.click_point_label)
 
         self.countdown_label = QLabel("")
         self.countdown_label.setStyleSheet("color: #0ea5e9; font-weight: bold; font-size: 11px;")
@@ -878,24 +898,6 @@ class MainWindow(QMainWindow):
         h_roi_cfg.addWidget(QLabel("检测周期跟随操作间隔"))
         g_roi.addLayout(h_roi_cfg)
 
-        h_action = QHBoxLayout()
-        h_action.addWidget(QLabel("到时操作:"))
-        self.operation_action_combo = QComboBox()
-        self.operation_action_combo.addItem("🔄 刷新网页", "refresh")
-        self.operation_action_combo.addItem("🖱️ 点击拾取点位", "click")
-        current_action = self.config.get("operation_action", "refresh")
-        idx = self.operation_action_combo.findData(current_action)
-        if idx >= 0: self.operation_action_combo.setCurrentIndex(idx)
-        h_action.addWidget(self.operation_action_combo, 1)
-        self.pick_point_btn = QPushButton("📍 拾取点位")
-        self.pick_point_btn.clicked.connect(self.start_point_picker)
-        h_action.addWidget(self.pick_point_btn)
-        g_roi.addLayout(h_action)
-
-        self.click_point_label = QLabel(self.format_click_point())
-        self.click_point_label.setStyleSheet("color:#38bdf8;font-size:11px;")
-        g_roi.addWidget(self.click_point_label)
-
         self.roi_countdown_label = QLabel("")
         self.roi_countdown_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
         g_roi.addWidget(self.roi_countdown_label)
@@ -1001,6 +1003,17 @@ class MainWindow(QMainWindow):
         self.roi_overlay.point_selected.connect(self.on_point_selected)
         self.roi_overlay.rects = list(self.roi_list)
         self.roi_overlay.setGeometry(self.webview.rect())
+        # V24.0 的点位是屏幕绝对坐标；V24.1 改为保存网页视图内部坐标。
+        # 首次升级时自动转换一次，避免旧配置立即失效。
+        if len(self.click_point) >= 2 and self.config.get("click_point_space") != "webview_local":
+            try:
+                gp = QPoint(int(self.click_point[0]), int(self.click_point[1]))
+                lp = self.webview.mapFromGlobal(gp)
+                self.click_point = [lp.x(), lp.y()]
+                self.config["click_point"] = list(self.click_point)
+                self.config["click_point_space"] = "webview_local"
+            except Exception as e:
+                _write_runtime_log(f"旧点位坐标转换失败: {e}", "WARN")
         self.roi_overlay.raise_()
         self.webview.installEventFilter(self)
 
@@ -1283,7 +1296,7 @@ class MainWindow(QMainWindow):
             mem_text = f"{mem:.1f} MB" if mem is not None else "未知"
             _write_runtime_log(
                 f"心跳诊断 | 内存={mem_text} | OCR忙碌={self.ocr_busy} | "
-                f"定时OCR={self.roi_clock_timer.isActive()} | 定时刷新={self.refresh_clock.isActive()} | "
+                f"定时OCR={self.roi_clock_timer.isActive()} | 定时操作={self.refresh_clock.isActive()} | "
                 f"网页加载中={getattr(self, 'web_loading', False)} | 连续加载计数={getattr(self, 'reload_in_progress_count', 0)} | "
                 f"ROI数量={len(self.roi_list)} | URL={url}"
             )
@@ -1599,6 +1612,7 @@ class MainWindow(QMainWindow):
         self.config["operation_interval"] = self.operation_interval.value()
         self.config["operation_action"] = self.operation_action_combo.currentData()
         self.config["click_point"] = list(self.click_point) if getattr(self, "click_point", None) else []
+        self.config["click_point_space"] = "webview_local"
         self.config["selected_ip"] = self.ip_combo.currentText() 
         self.config["reminder_sound_index"] = self.sound_combo.currentIndex()
         self.config["reminder_custom_path"] = self.custom_sound_path
@@ -1672,12 +1686,34 @@ class MainWindow(QMainWindow):
         self.log("📍 已进入点位拾取模式，请在网页上点击需要自动操作的位置")
 
     def on_point_selected(self, point):
+        # point 是 PersistentROIOverlay 内部坐标，最终执行时再转换为屏幕坐标。
         self.click_point = [point.x(), point.y()]
+        self.config["click_point_space"] = "webview_local"
         self.click_point_label.setText(self.format_click_point())
         self.pick_point_btn.setText("📍 重新拾取点位")
         self.operation_action_combo.setCurrentIndex(max(0, self.operation_action_combo.findData("click")))
-        self.log(f"📍 已拾取点位: ({point.x()}, {point.y()})")
-        self.status_label.setText(f"已设置点击点位 ({point.x()}, {point.y()})")
+        self.log(f"📍 已拾取网页点位: ({point.x()}, {point.y()})")
+        self.status_label.setText(f"已设置网页点击点位 ({point.x()}, {point.y()})")
+        self.save_settings()
+
+    def _native_click_screen(self, x, y):
+        """在 Windows 上对真实屏幕坐标执行鼠标左键点击。
+        QTest.mouseClick(QWebEngineView, ...) 对 Chromium 内容区域并不总能产生真实网页输入事件，
+        因此这里使用 Windows SendInput/mouse_event 走系统级鼠标输入，可靠性更高。
+        """
+        if sys.platform.startswith("win"):
+            import ctypes
+            user32 = ctypes.windll.user32
+            # 移动到拾取位置并发送真实左键按下/释放。
+            if not user32.SetCursorPos(int(x), int(y)):
+                raise RuntimeError("SetCursorPos 失败")
+            user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+            user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+            return
+        # 非 Windows 仅作为开发环境回退。
+        from PySide6.QtTest import QTest
+        local = self.webview.mapFromGlobal(QPoint(int(x), int(y)))
+        QTest.mouseClick(self.webview, Qt.LeftButton, Qt.NoModifier, local)
 
     def perform_scheduled_operation(self):
         action = self.operation_action_combo.currentData()
@@ -1687,10 +1723,14 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("⚠️ 请先拾取点击点位")
                 return
             try:
-                from PySide6.QtTest import QTest
-                local = self.webview.mapFromGlobal(QPoint(self.click_point[0], self.click_point[1]))
-                QTest.mouseClick(self.webview, Qt.LeftButton, Qt.NoModifier, local)
-                self.log(f"🖱️ 到时执行点击: ({self.click_point[0]}, {self.click_point[1]})")
+                # 每次执行前重新把网页内部坐标映射成当前屏幕坐标。
+                local = QPoint(int(self.click_point[0]), int(self.click_point[1]))
+                global_pos = self.webview.mapToGlobal(local)
+                self.activateWindow()
+                self.webview.setFocus()
+                self._native_click_screen(global_pos.x(), global_pos.y())
+                self.log(f"🖱️ 到时执行真实点击: 网页坐标({local.x()}, {local.y()}) → 屏幕坐标({global_pos.x()}, {global_pos.y()})")
+                self.status_label.setText(f"🖱️ 已点击拾取点位 ({local.x()}, {local.y()})")
             except Exception as e:
                 _log_exception("自动点击异常", e)
                 self.log(f"❌ 自动点击异常: {e}")
