@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V24.1 - 操作间隔/可靠点击版)
+网页刷新数字监控 (V24.2 - 后台点击修复版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
@@ -672,7 +672,7 @@ class _OCRRequestProxy(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V24.1 - 操作间隔/可靠点击版)")
+        self.setWindowTitle("网页刷新数字监控 (V24.2 - 后台点击修复版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -1760,8 +1760,15 @@ class MainWindow(QMainWindow):
             self.log(f"🖱️ 后台点击成功: ({x}, {y})，未移动系统鼠标")
             self.status_label.setText(f"🖱️ 后台点击成功 ({x}, {y})")
         else:
-            reason = result.get("reason", "未知错误") if isinstance(result, dict) else str(result)
-            self.log(f"⚠️ 后台点击失败: {reason}")
+            if isinstance(result, dict):
+                reason = result.get("reason", "未知错误")
+                debug = result.get("debug", "")
+                self.log(f"⚠️ 后台点击失败: {reason}")
+                if debug:
+                    self.log(f"   调试信息: {debug}")
+            else:
+                reason = str(result)
+                self.log(f"⚠️ 后台点击失败: {reason}")
             self.status_label.setText(f"⚠️ 后台点击失败: {reason}")
 
     def perform_scheduled_operation(self):
@@ -1824,41 +1831,86 @@ class MainWindow(QMainWindow):
 
 
 # ==================== 后台点位点击脚本 ====================
+# ==================== 后台点位点击脚本 ====================
+# 注意：后台点击不移动 Windows 鼠标。
+# QWebEngine 的 Qt 坐标与网页 CSS 坐标在高 DPI/网页缩放下可能存在比例差异，
+# 因此拾取和执行时会尝试多组坐标，并优先寻找真正可点击的元素。
 BACKGROUND_POINT_CAPTURE_SCRIPT = r"""
-(function(x,y){
+(function(px,py){
+    function cssEscape(s){
+        try{return CSS.escape(String(s));}
+        catch(e){return String(s).replace(/[^a-zA-Z0-9_-]/g,"_");}
+    }
     function cssPath(el){
         if(!el || el.nodeType!==1) return "";
-        function esc(s){try{return CSS.escape(String(s));}catch(e){return String(s).replace(/[^a-zA-Z0-9_-]/g,"_");}}
-        if(el.id) return "#"+esc(el.id);
-        var parts=[], n=el;
-        while(n && n.nodeType===1 && n!==document.body){
+        if(el.id) return "#"+cssEscape(el.id);
+        var parts=[], n=el, guard=0;
+        while(n && n.nodeType===1 && n!==document.body && guard++<8){
             var p=n.tagName.toLowerCase();
-            if(n.getAttribute && n.getAttribute("name")) p+='[name="'+String(n.getAttribute("name")).replace(/"/g,'\\"')+'"]';
-            else if(n.classList && n.classList.length){
-                var c=Array.from(n.classList).filter(Boolean).slice(0,2);
-                if(c.length) p+="."+c.map(esc).join(".");
+            var name=n.getAttribute && n.getAttribute("name");
+            if(name) p+='[name="'+String(name).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"]';
+            else {
+                var cls=n.classList ? Array.from(n.classList).filter(Boolean).slice(0,2) : [];
+                if(cls.length) p+="."+cls.map(cssEscape).join(".");
             }
-            var s=n, idx=1;
-            while((s=s.previousElementSibling)) if(s.tagName===n.tagName) idx++;
-            p+=":nth-of-type("+idx+")"; parts.unshift(p); n=n.parentElement;
+            var same=0, sib=n;
+            while((sib=sib.previousElementSibling)){
+                if(sib.tagName===n.tagName) same++;
+            }
+            p+=":nth-of-type("+(same+1)+")";
+            parts.unshift(p);
+            n=n.parentElement;
         }
         return parts.join(" > ");
     }
     function xpath(el){
         if(!el || el.nodeType!==1) return "";
         if(el.id) return '//*[@id="'+String(el.id).replace(/"/g,'&quot;')+'"]';
-        var parts=[], n=el;
-        while(n && n.nodeType===1){
+        var parts=[],n=el,guard=0;
+        while(n && n.nodeType===1 && guard++<15){
             var idx=1,s=n.previousElementSibling;
             while(s){if(s.tagName===n.tagName)idx++;s=s.previousElementSibling;}
-            parts.unshift(n.tagName.toLowerCase()+"["+idx+"]"); n=n.parentElement;
+            parts.unshift(n.tagName.toLowerCase()+"["+idx+"]");
+            n=n.parentElement;
         }
         return "/"+parts.join("/");
     }
-    var el=document.elementFromPoint(Number(x),Number(y));
-    if(!el) return {selector:"",xpath:"",tag:"",text:""};
-    return {selector:cssPath(el),xpath:xpath(el),tag:el.tagName.toLowerCase(),
-            text:String(el.innerText||el.textContent||"").trim().replace(/\s+/g," ").slice(0,120)};
+    function clickable(el){
+        var n=el,guard=0;
+        while(n && n!==document.body && guard++<8){
+            var tag=(n.tagName||"").toLowerCase();
+            var role=(n.getAttribute&&n.getAttribute("role")||"").toLowerCase();
+            var ce=(n.getAttribute&&n.getAttribute("contenteditable")||"").toLowerCase();
+            if(tag==="button" || tag==="a" || tag==="input" || tag==="select" ||
+               tag==="textarea" || tag==="summary" || tag==="video" ||
+               role==="button" || role==="link" || role==="tab" || role==="menuitem" ||
+               n.onclick || n.getAttribute("onclick") || ce==="true") return n;
+            n=n.parentElement;
+        }
+        return el;
+    }
+    var dpr=window.devicePixelRatio||1;
+    var zoom=1;
+    try{zoom=window.visualViewport&&window.visualViewport.scale?window.visualViewport.scale:1;}catch(e){}
+    var candidates=[[Number(px),Number(py)]];
+    if(dpr!==1){candidates.push([Number(px)/dpr,Number(py)/dpr]);candidates.push([Number(px)*dpr,Number(py)*dpr]);}
+    if(zoom!==1){candidates.push([Number(px)/zoom,Number(py)/zoom]);candidates.push([Number(px)*zoom,Number(py)*zoom]);}
+    var el=null,used=null;
+    for(var i=0;i<candidates.length;i++){
+        var q=candidates[i], ex=q[0], ey=q[1];
+        if(ex>=0 && ey>=0 && ex<=window.innerWidth && ey<=window.innerHeight){
+            try{el=document.elementFromPoint(ex,ey);}catch(e){el=null;}
+            if(el){used=[ex,ey];break;}
+        }
+    }
+    if(!el) return {ok:false,selector:"",xpath:"",tag:"",text:"",
+                   x:Number(px),y:Number(py),reason:"网页坐标与CSS坐标不匹配"};
+    var target=clickable(el);
+    return {ok:true,selector:cssPath(target),xpath:xpath(target),
+            tag:(target.tagName||"").toLowerCase(),
+            text:String(target.innerText||target.textContent||"").trim().replace(/\s+/g," ").slice(0,120),
+            x:used?used[0]:Number(px),y:used?used[1]:Number(py),
+            dpr:dpr,zoom:zoom};
 })(%d,%d)
 """
 
@@ -1868,55 +1920,80 @@ BACKGROUND_POINT_CLICK_SCRIPT = r"""
         try{return document.evaluate(path,document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;}
         catch(e){return null;}
     }
-    var el=null;
-    try{if(data.selector) el=document.querySelector(data.selector);}catch(e){}
-    if(!el && data.xpath) el=xp(data.xpath);
+    function findElement(){
+        var el=null;
+        try{if(data.selector) el=document.querySelector(data.selector);}catch(e){}
+        if(!el && data.xpath) el=xp(data.xpath);
+        return el;
+    }
+    function clickable(el){
+        var n=el,guard=0;
+        while(n && n!==document.body && guard++<8){
+            var tag=(n.tagName||"").toLowerCase();
+            var role=(n.getAttribute&&n.getAttribute("role")||"").toLowerCase();
+            if(tag==="button"||tag==="a"||tag==="input"||tag==="select"||tag==="textarea"||
+               tag==="summary"||tag==="video"||role==="button"||role==="link"||
+               role==="tab"||role==="menuitem"||n.onclick||n.getAttribute("onclick")) return n;
+            n=n.parentElement;
+        }
+        return el;
+    }
+    var el=findElement();
+    var dpr=window.devicePixelRatio||1;
+    var zoom=1;
+    try{zoom=window.visualViewport&&window.visualViewport.scale?window.visualViewport.scale:1;}catch(e){}
+    var pts=[[Number(data.x),Number(data.y)]];
+    if(dpr!==1){pts.push([Number(data.x)/dpr,Number(data.y)/dpr]);pts.push([Number(data.x)*dpr,Number(data.y)*dpr]);}
+    if(zoom!==1){pts.push([Number(data.x)/zoom,Number(data.y)/zoom]);pts.push([Number(data.x)*zoom,Number(data.y)*zoom]);}
+    if(!el){
+        for(var i=0;i<pts.length;i++){
+            var p=pts[i];
+            if(p[0]>=0&&p[1]>=0&&p[0]<=window.innerWidth&&p[1]<=window.innerHeight){
+                try{el=document.elementFromPoint(p[0],p[1]);}catch(e){el=null;}
+                if(el){el=clickable(el);break;}
+            }
+        }
+    }
+    if(!el) return {ok:false,reason:"找不到网页点击元素，请重新拾取点位",debug:{dpr:dpr,zoom:zoom,viewport:[window.innerWidth,window.innerHeight]}};
 
-    var x=Number(data.x), y=Number(data.y);
-    if(!el) el=document.elementFromPoint(x,y);
-    if(!el) return {ok:false,reason:"点击位置没有网页元素"};
-
-    try{
-        if(el.focus) el.focus({preventScroll:true});
-    }catch(e){}
-
+    try{el.scrollIntoView({block:"nearest",inline:"nearest"});}catch(e){}
     var r=null;
     try{r=el.getBoundingClientRect();}catch(e){}
+    var cx=r ? r.left+r.width/2 : Number(data.x);
+    var cy=r ? r.top+r.height/2 : Number(data.y);
 
-    var cx=r ? (r.left+r.width/2) : x;
-    var cy=r ? (r.top+r.height/2) : y;
+    // 先执行原生 DOM click。对按钮、链接、表单控件兼容性最好。
+    var clicked=false, method="";
+    try{
+        if(typeof el.click==="function"){
+            el.click();
+            clicked=true;
+            method="HTMLElement.click";
+        }
+    }catch(e){}
 
-    function fire(type, Ctor){
+    // 某些前端框架监听 Pointer/Mouse 事件，再补发一组事件。
+    function fire(type, Ctor, buttons){
         try{
             var ev=new Ctor(type,{bubbles:true,cancelable:true,composed:true,
-                view:window,clientX:cx,clientY:cy,button:0,buttons:1,
+                view:window,clientX:cx,clientY:cy,button:0,buttons:buttons||0,
                 pointerId:1,pointerType:"mouse",isPrimary:true});
             el.dispatchEvent(ev);
         }catch(e){}
     }
-
-    // 完整模拟一次鼠标点击，不操作 Windows 系统鼠标。
-    fire("pointerover",PointerEvent);
-    fire("pointerenter",PointerEvent);
-    fire("mouseover",MouseEvent);
-    fire("pointerdown",PointerEvent);
-    fire("mousedown",MouseEvent);
-    fire("pointerup",PointerEvent);
-    fire("mouseup",MouseEvent);
-
-    var clicked=false;
-    try{
-        if(typeof el.click==="function"){el.click();clicked=true;}
-    }catch(e){}
-
+    try{fire("pointerover",PointerEvent,0);fire("mouseover",MouseEvent,0);}catch(e){}
+    try{fire("pointerdown",PointerEvent,1);fire("mousedown",MouseEvent,1);
+        fire("pointerup",PointerEvent,0);fire("mouseup",MouseEvent,0);}catch(e){}
     try{
         el.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,composed:true,
             view:window,clientX:cx,clientY:cy,button:0,buttons:0}));
         clicked=true;
+        if(!method) method="MouseEvent.click";
     }catch(e){}
 
-    return {ok:clicked,tag:el.tagName.toLowerCase(),
-        text:String(el.innerText||el.textContent||"").trim().replace(/\s+/g," ").slice(0,80)};
+    return {ok:clicked,method:method,tag:(el.tagName||"").toLowerCase(),
+        text:String(el.innerText||el.textContent||"").trim().replace(/\s+/g," ").slice(0,80),
+        selector:data.selector||"",x:cx,y:cy,dpr:dpr,zoom:zoom};
 })(%s)
 """
 
