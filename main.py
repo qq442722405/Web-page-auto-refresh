@@ -160,10 +160,6 @@ def load_config():
         "operation_action": "refresh",
         "click_point": [],
         "click_point_space": "webview_local",
-        "element_click_selector": "",
-        "element_click_xpath": "",
-        "element_click_text": "",
-        "element_click_tag": "",
         "panel_collapsed": False,
         "screenshot_path": os.getcwd(),
         "selected_ip": "",
@@ -707,13 +703,10 @@ class MainWindow(QMainWindow):
         saved_roi_list = self.config.get("roi_list", [[100, 100, 300, 200]])
         self.roi_list = [QRect(r[0], r[1], r[2], r[3]) for r in saved_roi_list]
         self.click_point = list(self.config.get("click_point", []))
-        self.element_click_selector = self.config.get("element_click_selector", "")
-        self.element_click_xpath = self.config.get("element_click_xpath", "")
-        self.element_click_text = self.config.get("element_click_text", "")
-        self.element_click_tag = self.config.get("element_click_tag", "")
-        self.element_picker_timer = QTimer(self)
-        self.element_picker_timer.timeout.connect(self.poll_element_picker_result)
-        self.element_picker_active = False
+        self.click_target_selector = self.config.get("click_target_selector", "")
+        self.click_target_xpath = self.config.get("click_target_xpath", "")
+        self.click_target_tag = self.config.get("click_target_tag", "")
+        self.click_target_text = self.config.get("click_target_text", "")
 
         # 已记忆消报的数量与组合特征
         self.box_latest_digits = {}
@@ -787,7 +780,6 @@ class MainWindow(QMainWindow):
         self.operation_action_combo = QComboBox()
         self.operation_action_combo.addItem("🔄 刷新网页", "refresh")
         self.operation_action_combo.addItem("🖱️ 后台点击拾取点位", "click")
-        self.operation_action_combo.addItem("🎯 后台点击网页元素", "element_click")
         current_action = self.config.get("operation_action", "refresh")
         idx = self.operation_action_combo.findData(current_action)
         if idx >= 0:
@@ -796,18 +788,11 @@ class MainWindow(QMainWindow):
         self.pick_point_btn = QPushButton("📍 拾取点击点位")
         self.pick_point_btn.clicked.connect(self.start_point_picker)
         h_action.addWidget(self.pick_point_btn)
-        self.pick_element_btn = QPushButton("🎯 拾取网页元素")
-        self.pick_element_btn.clicked.connect(self.start_element_picker)
-        h_action.addWidget(self.pick_element_btn)
         g_url.addLayout(h_action)
 
         self.click_point_label = QLabel(self.format_click_point())
         self.click_point_label.setStyleSheet("color:#38bdf8;font-size:11px;")
         g_url.addWidget(self.click_point_label)
-        self.element_click_label = QLabel(self.format_element_target())
-        self.element_click_label.setStyleSheet("color:#a78bfa;font-size:11px;")
-        self.element_click_label.setWordWrap(True)
-        g_url.addWidget(self.element_click_label)
 
         self.countdown_label = QLabel("")
         self.countdown_label.setStyleSheet("color: #0ea5e9; font-weight: bold; font-size: 11px;")
@@ -1632,11 +1617,11 @@ class MainWindow(QMainWindow):
         self.config["operation_interval"] = self.operation_interval.value()
         self.config["operation_action"] = self.operation_action_combo.currentData()
         self.config["click_point"] = list(self.click_point) if getattr(self, "click_point", None) else []
+        self.config["click_target_selector"] = getattr(self, "click_target_selector", "")
+        self.config["click_target_xpath"] = getattr(self, "click_target_xpath", "")
+        self.config["click_target_tag"] = getattr(self, "click_target_tag", "")
+        self.config["click_target_text"] = getattr(self, "click_target_text", "")
         self.config["click_point_space"] = "webview_local"
-        self.config["element_click_selector"] = getattr(self, "element_click_selector", "")
-        self.config["element_click_xpath"] = getattr(self, "element_click_xpath", "")
-        self.config["element_click_text"] = getattr(self, "element_click_text", "")
-        self.config["element_click_tag"] = getattr(self, "element_click_tag", "")
         self.config["click_point_space"] = "webview_local"
         self.config["selected_ip"] = self.ip_combo.currentText() 
         self.config["reminder_sound_index"] = self.sound_combo.currentIndex()
@@ -1711,15 +1696,16 @@ class MainWindow(QMainWindow):
         self.log("📍 已进入点位拾取模式，请在网页上点击需要自动操作的位置")
 
     def on_point_selected(self, point):
-        # point 是 PersistentROIOverlay 内部坐标，最终执行时再转换为屏幕坐标。
+        # 保存网页视图内部坐标，并同时记录该位置当前对应的 DOM 元素。
+        # 执行时优先对元素发送完整的 Pointer/Mouse 事件，不移动系统鼠标。
         self.click_point = [point.x(), point.y()]
         self.config["click_point_space"] = "webview_local"
         self.click_point_label.setText(self.format_click_point())
         self.pick_point_btn.setText("📍 重新拾取点位")
         self.operation_action_combo.setCurrentIndex(max(0, self.operation_action_combo.findData("click")))
         self.log(f"📍 已拾取网页点位: ({point.x()}, {point.y()})")
-        self.status_label.setText(f"已设置网页点击点位 ({point.x()}, {point.y()})")
-        self.save_settings()
+        self.status_label.setText(f"正在记录点击目标 ({point.x()}, {point.y()})...")
+        self._capture_background_click_target(point.x(), point.y())
 
     def _native_click_screen(self, x, y):
         """在 Windows 上对真实屏幕坐标执行鼠标左键点击。
@@ -1740,63 +1726,21 @@ class MainWindow(QMainWindow):
         local = self.webview.mapFromGlobal(QPoint(int(x), int(y)))
         QTest.mouseClick(self.webview, Qt.LeftButton, Qt.NoModifier, local)
 
-    def format_element_target(self):
-        selector = getattr(self, "element_click_selector", "") or getattr(self, "element_click_xpath", "")
-        if not selector:
-            return "🎯 当前网页元素: 未设置"
-        tag = getattr(self, "element_click_tag", "") or "element"
-        text = getattr(self, "element_click_text", "") or ""
-        if len(text) > 60:
-            text = text[:60] + "..."
-        return f"🎯 当前元素: <{tag}> {text}\n定位: {selector}"
+    def _capture_background_click_target(self, x, y):
+        js = BACKGROUND_POINT_CAPTURE_SCRIPT % (int(x), int(y))
+        self.webview.page().runJavaScript(js, lambda result: self._background_target_captured(result, x, y))
 
-    def start_element_picker(self):
-        if not hasattr(self, "webview"):
-            return
-        try:
-            self.element_picker_active = True
-            self.pick_element_btn.setText("🎯 移动鼠标预览，点击确定")
-            self.status_label.setText("🎯 正在拾取网页元素：鼠标经过元素会高亮，点击确定；ESC取消")
-            self.log("🎯 已进入网页元素拾取模式：鼠标经过元素会变色，点击后确定")
-            self.webview.setFocus()
-            self.webview.page().runJavaScript(ELEMENT_PICKER_SCRIPT)
-            self.element_picker_timer.start(120)
-        except Exception as e:
-            self.element_picker_active = False
-            _log_exception("网页元素拾取启动异常", e)
-            self.log(f"❌ 网页元素拾取启动失败: {e}")
-
-    def poll_element_picker_result(self):
-        if not self.element_picker_active:
-            return
-        try:
-            self.webview.page().runJavaScript("window.__v242ElementPickerResult || null", self.on_element_picker_result)
-        except Exception as e:
-            self.log(f"❌ 元素拾取轮询异常: {e}")
-
-    def on_element_picker_result(self, result):
-        if not self.element_picker_active or not result:
-            return
-        self.element_picker_active = False
-        self.element_picker_timer.stop()
-        if result.get("cancelled"):
-            self.pick_element_btn.setText("🎯 拾取网页元素")
-            self.status_label.setText("网页元素拾取已取消")
-            self.log("⏹️ 网页元素拾取已取消")
-            return
-        self.element_click_selector = result.get("selector", "")
-        self.element_click_xpath = result.get("xpath", "")
-        self.element_click_text = result.get("text", "")
-        self.element_click_tag = result.get("tag", "")
-        self.element_click_label.setText(self.format_element_target())
-        self.pick_element_btn.setText("🎯 重新拾取元素")
-        idx = self.operation_action_combo.findData("element_click")
-        if idx >= 0:
-            self.operation_action_combo.setCurrentIndex(idx)
-        self.log(f"🎯 已确定网页元素: <{self.element_click_tag}> {self.element_click_text[:50]}")
-        self.log(f"   CSS: {self.element_click_selector}")
-        self.log(f"   XPath: {self.element_click_xpath}")
-        self.status_label.setText("🎯 网页元素已确定，后续将使用后台点击，不移动鼠标")
+    def _background_target_captured(self, result, x, y):
+        if isinstance(result, dict):
+            self.click_target_selector = result.get("selector", "") or ""
+            self.click_target_xpath = result.get("xpath", "") or ""
+            self.click_target_tag = result.get("tag", "") or ""
+            self.click_target_text = result.get("text", "") or ""
+            if self.click_target_selector or self.click_target_xpath:
+                self.log(f"🎯 已记录后台点击目标: <{self.click_target_tag}> {self.click_target_text[:50]}")
+            else:
+                self.log("📍 已记录坐标点击目标（该位置没有可定位的 DOM 元素）")
+        self.status_label.setText(f"已设置后台点击点位 ({x}, {y})")
         self.save_settings()
 
     def perform_background_point_click(self):
@@ -1805,51 +1749,25 @@ class MainWindow(QMainWindow):
             self.status_label.setText("⚠️ 请先拾取点击点位")
             return
         x, y = int(self.click_point[0]), int(self.click_point[1])
-        js = f'''(function() {{
-            try {{
-                const el = document.elementFromPoint({x}, {y});
-                if (!el) return "NO_ELEMENT";
-                if (typeof el.click === "function") el.click();
-                else el.dispatchEvent(new MouseEvent("click", {{bubbles:true,cancelable:true,view:window,clientX:{x},clientY:{y}}}));
-                return "OK";
-            }} catch(e) {{ return "ERROR:" + String(e); }}
-        }})()'''
+        selector = getattr(self, "click_target_selector", "") or ""
+        xpath = getattr(self, "click_target_xpath", "") or ""
+        payload = json.dumps({"x": x, "y": y, "selector": selector, "xpath": xpath}, ensure_ascii=False)
+        js = BACKGROUND_POINT_CLICK_SCRIPT % payload
         self.webview.page().runJavaScript(js, lambda r: self._background_point_click_done(r, x, y))
 
     def _background_point_click_done(self, result, x, y):
-        if result == "OK":
-            self.log(f"🖱️ 已后台点击网页点位: ({x}, {y})（系统鼠标不移动）")
+        if isinstance(result, dict) and result.get("ok"):
+            self.log(f"🖱️ 后台点击成功: ({x}, {y})，未移动系统鼠标")
             self.status_label.setText(f"🖱️ 后台点击成功 ({x}, {y})")
         else:
-            self.log(f"⚠️ 后台点击失败: {result}")
-            self.status_label.setText(f"⚠️ 后台点击失败: {result}")
-
-    def perform_element_click(self):
-        selector = getattr(self, "element_click_selector", "")
-        xpath = getattr(self, "element_click_xpath", "")
-        if not selector and not xpath:
-            self.log("⚠️ 尚未拾取网页元素")
-            self.status_label.setText("⚠️ 请先拾取网页元素")
-            return
-        payload = json.dumps({"selector": selector, "xpath": xpath}, ensure_ascii=False)
-        js = ELEMENT_CLICK_SCRIPT % payload
-        self.webview.page().runJavaScript(js, self._element_click_done)
-
-    def _element_click_done(self, result):
-        if isinstance(result, dict) and result.get("ok"):
-            self.log(f"🎯 已后台点击网页元素: {result.get('text','')[:60]}")
-            self.status_label.setText("🎯 网页元素后台点击成功（系统鼠标不移动）")
-        else:
             reason = result.get("reason", "未知错误") if isinstance(result, dict) else str(result)
-            self.log(f"⚠️ 网页元素后台点击失败: {reason}")
-            self.status_label.setText(f"⚠️ 网页元素点击失败: {reason}")
+            self.log(f"⚠️ 后台点击失败: {reason}")
+            self.status_label.setText(f"⚠️ 后台点击失败: {reason}")
 
     def perform_scheduled_operation(self):
         action = self.operation_action_combo.currentData()
         if action == "click":
             self.perform_background_point_click()
-        elif action == "element_click":
-            self.perform_element_click()
         else:
             self.refresh_page()
 
@@ -1904,48 +1822,101 @@ class MainWindow(QMainWindow):
             QApplication.quit()
 
 
-# ==================== 8A. 网页元素拾取与后台点击 ====================
-ELEMENT_PICKER_SCRIPT = r"""
-(function() {
-    try { if (window.__v242ElementPickerCleanup) window.__v242ElementPickerCleanup(); } catch(e) {}
-    const oldOutline = new WeakMap(); let current = null;
-    function esc(v) { try { return CSS.escape(String(v)); } catch(e) { return String(v).replace(/[^a-zA-Z0-9_-]/g, '_'); } }
-    function cssPath(el) {
-        if (!el || el.nodeType !== 1) return '';
-        if (el.id) return '#' + esc(el.id);
-        const parts=[]; let node=el;
-        while(node && node.nodeType===1 && node!==document.body) {
-            let part=node.tagName.toLowerCase();
-            if(node.classList && node.classList.length) { const cls=Array.from(node.classList).filter(Boolean).slice(0,2); if(cls.length) part += '.' + cls.map(esc).join('.'); }
-            let sib=node, idx=1; while((sib=sib.previousElementSibling)) if(sib.tagName===node.tagName) idx++;
-            part += ':nth-of-type(' + idx + ')'; parts.unshift(part); node=node.parentElement;
+
+# ==================== 后台点位点击脚本 ====================
+BACKGROUND_POINT_CAPTURE_SCRIPT = r"""
+(function(x,y){
+    function cssPath(el){
+        if(!el || el.nodeType!==1) return "";
+        function esc(s){try{return CSS.escape(String(s));}catch(e){return String(s).replace(/[^a-zA-Z0-9_-]/g,"_");}}
+        if(el.id) return "#"+esc(el.id);
+        var parts=[], n=el;
+        while(n && n.nodeType===1 && n!==document.body){
+            var p=n.tagName.toLowerCase();
+            if(n.getAttribute && n.getAttribute("name")) p+='[name="'+String(n.getAttribute("name")).replace(/"/g,'\\"')+'"]';
+            else if(n.classList && n.classList.length){
+                var c=Array.from(n.classList).filter(Boolean).slice(0,2);
+                if(c.length) p+="."+c.map(esc).join(".");
+            }
+            var s=n, idx=1;
+            while((s=s.previousElementSibling)) if(s.tagName===n.tagName) idx++;
+            p+=":nth-of-type("+idx+")"; parts.unshift(p); n=n.parentElement;
         }
-        return parts.join(' > ');
+        return parts.join(" > ");
     }
-    function xpath(el) {
-        if(!el || el.nodeType!==1) return '';
-        if(el.id) return '//*[@id="' + String(el.id).replace(/"/g,'&quot;') + '"]';
-        const parts=[]; let node=el;
-        while(node && node.nodeType===1) { let idx=1,sib=node.previousElementSibling; while(sib){if(sib.tagName===node.tagName)idx++;sib=sib.previousElementSibling;} parts.unshift(node.tagName.toLowerCase()+'['+idx+']'); node=node.parentElement; }
-        return '/' + parts.join('/');
+    function xpath(el){
+        if(!el || el.nodeType!==1) return "";
+        if(el.id) return '//*[@id="'+String(el.id).replace(/"/g,'&quot;')+'"]';
+        var parts=[], n=el;
+        while(n && n.nodeType===1){
+            var idx=1,s=n.previousElementSibling;
+            while(s){if(s.tagName===n.tagName)idx++;s=s.previousElementSibling;}
+            parts.unshift(n.tagName.toLowerCase()+"["+idx+"]"); n=n.parentElement;
+        }
+        return "/"+parts.join("/");
     }
-    function describe(el) { if(!el || el.nodeType!==1)return null; return {selector:cssPath(el),xpath:xpath(el),tag:el.tagName.toLowerCase(),text:((el.innerText||el.textContent||'').trim().replace(/\\s+/g,' ')).slice(0,120),id:el.id||'',className:typeof el.className==='string'?el.className.slice(0,200):''}; }
-    function highlight(el) { if(current&&current!==el) current.style.outline=oldOutline.get(current)||''; current=el; if(el&&!oldOutline.has(el))oldOutline.set(el,el.style.outline||''); if(el){el.style.outline='3px solid #00e5ff';el.style.outlineOffset='1px';} }
-    function clear(){if(current){current.style.outline=oldOutline.get(current)||'';current.style.outlineOffset='';}current=null;}
-    function over(e){e.stopPropagation();highlight(e.target&&e.target.closest?e.target.closest('*'):e.target);}
-    function click(e){e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();const el=e.target&&e.target.closest?e.target.closest('*'):e.target;window.__v242ElementPickerResult=describe(el);cleanup();}
-    function key(e){if(e.key==='Escape'){e.preventDefault();e.stopPropagation();window.__v242ElementPickerResult={cancelled:true};cleanup();}}
-    function cleanup(){document.removeEventListener('mouseover',over,true);document.removeEventListener('click',click,true);document.removeEventListener('keydown',key,true);clear();window.__v242ElementPickerCleanup=null;}
-    window.__v242ElementPickerResult=null;window.__v242ElementPickerCleanup=cleanup;
-    document.addEventListener('mouseover',over,true);document.addEventListener('click',click,true);document.addEventListener('keydown',key,true);
-})();
+    var el=document.elementFromPoint(Number(x),Number(y));
+    if(!el) return {selector:"",xpath:"",tag:"",text:""};
+    return {selector:cssPath(el),xpath:xpath(el),tag:el.tagName.toLowerCase(),
+            text:String(el.innerText||el.textContent||"").trim().replace(/\s+/g," ").slice(0,120)};
+})(%d,%d)
 """
-ELEMENT_CLICK_SCRIPT = r"""
+
+BACKGROUND_POINT_CLICK_SCRIPT = r"""
 (function(data){
-    function xp(path){try{return document.evaluate(path,document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;}catch(e){return null;}}
-    let el=null; try{if(data.selector)el=document.querySelector(data.selector);}catch(e){} if(!el)el=xp(data.xpath||'');
-    if(!el)return {ok:false,reason:'元素不存在'};
-    try{if(typeof el.click==='function')el.click();else el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));return {ok:true,text:((el.innerText||el.textContent||'').trim().replace(/\\s+/g,' ')).slice(0,80)};}catch(e){return {ok:false,reason:String(e)}}
+    function xp(path){
+        try{return document.evaluate(path,document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;}
+        catch(e){return null;}
+    }
+    var el=null;
+    try{if(data.selector) el=document.querySelector(data.selector);}catch(e){}
+    if(!el && data.xpath) el=xp(data.xpath);
+
+    var x=Number(data.x), y=Number(data.y);
+    if(!el) el=document.elementFromPoint(x,y);
+    if(!el) return {ok:false,reason:"点击位置没有网页元素"};
+
+    try{
+        if(el.focus) el.focus({preventScroll:true});
+    }catch(e){}
+
+    var r=null;
+    try{r=el.getBoundingClientRect();}catch(e){}
+
+    var cx=r ? (r.left+r.width/2) : x;
+    var cy=r ? (r.top+r.height/2) : y;
+
+    function fire(type, Ctor){
+        try{
+            var ev=new Ctor(type,{bubbles:true,cancelable:true,composed:true,
+                view:window,clientX:cx,clientY:cy,button:0,buttons:1,
+                pointerId:1,pointerType:"mouse",isPrimary:true});
+            el.dispatchEvent(ev);
+        }catch(e){}
+    }
+
+    // 完整模拟一次鼠标点击，不操作 Windows 系统鼠标。
+    fire("pointerover",PointerEvent);
+    fire("pointerenter",PointerEvent);
+    fire("mouseover",MouseEvent);
+    fire("pointerdown",PointerEvent);
+    fire("mousedown",MouseEvent);
+    fire("pointerup",PointerEvent);
+    fire("mouseup",MouseEvent);
+
+    var clicked=false;
+    try{
+        if(typeof el.click==="function"){el.click();clicked=true;}
+    }catch(e){}
+
+    try{
+        el.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,composed:true,
+            view:window,clientX:cx,clientY:cy,button:0,buttons:0}));
+        clicked=true;
+    }catch(e){}
+
+    return {ok:clicked,tag:el.tagName.toLowerCase(),
+        text:String(el.innerText||el.textContent||"").trim().replace(/\s+/g," ").slice(0,80)};
 })(%s)
 """
 
