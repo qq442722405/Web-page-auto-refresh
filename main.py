@@ -1837,163 +1837,87 @@ class MainWindow(QMainWindow):
 # 因此拾取和执行时会尝试多组坐标，并优先寻找真正可点击的元素。
 BACKGROUND_POINT_CAPTURE_SCRIPT = r"""
 (function(px,py){
-    function cssEscape(s){
-        try{return CSS.escape(String(s));}
-        catch(e){return String(s).replace(/[^a-zA-Z0-9_-]/g,"_");}
-    }
+    function cssEscape(s){try{return CSS.escape(String(s));}catch(e){return String(s).replace(/[^a-zA-Z0-9_-]/g,"_");}}
     function cssPath(el){
-        if(!el || el.nodeType!==1) return "";
-        if(el.id) return "#"+cssEscape(el.id);
-        var parts=[], n=el, guard=0;
-        while(n && n.nodeType===1 && n!==document.body && guard++<8){
+        if(!el||el.nodeType!==1)return "";
+        if(el.id)return "#"+cssEscape(el.id);
+        var parts=[],n=el,guard=0;
+        while(n&&n.nodeType===1&&n!==document.body&&guard++<12){
             var p=n.tagName.toLowerCase();
-            var name=n.getAttribute && n.getAttribute("name");
-            if(name) p+='[name="'+String(name).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"]';
-            else {
-                var cls=n.classList ? Array.from(n.classList).filter(Boolean).slice(0,2) : [];
-                if(cls.length) p+="."+cls.map(cssEscape).join(".");
-            }
-            var same=0, sib=n;
-            while((sib=sib.previousElementSibling)){
-                if(sib.tagName===n.tagName) same++;
-            }
-            p+=":nth-of-type("+(same+1)+")";
-            parts.unshift(p);
-            n=n.parentElement;
+            var name=n.getAttribute&&n.getAttribute("name");
+            if(name)p+='[name="'+String(name).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"]';
+            var cls=n.classList?Array.from(n.classList).filter(Boolean).slice(0,2):[];
+            if(cls.length)p+='.'+cls.map(cssEscape).join('.');
+            var same=0,sib=n;
+            while((sib=sib.previousElementSibling)){if(sib.tagName===n.tagName)same++;}
+            p+=':nth-of-type('+(same+1)+')'; parts.unshift(p); n=n.parentElement;
         }
-        return parts.join(" > ");
+        return parts.join(' > ');
     }
     function xpath(el){
-        if(!el || el.nodeType!==1) return "";
-        if(el.id) return '//*[@id="'+String(el.id).replace(/"/g,'&quot;')+'"]';
+        if(!el||el.nodeType!==1)return "";
+        if(el.id)return '//*[@id="'+String(el.id).replace(/"/g,'&quot;')+'"]';
         var parts=[],n=el,guard=0;
-        while(n && n.nodeType===1 && guard++<15){
-            var idx=1,s=n.previousElementSibling;
-            while(s){if(s.tagName===n.tagName)idx++;s=s.previousElementSibling;}
-            parts.unshift(n.tagName.toLowerCase()+"["+idx+"]");
-            n=n.parentElement;
-        }
-        return "/"+parts.join("/");
+        while(n&&n.nodeType===1&&guard++<20){var idx=1,s=n.previousElementSibling;while(s){if(s.tagName===n.tagName)idx++;s=s.previousElementSibling;}parts.unshift(n.tagName.toLowerCase()+'['+idx+']');n=n.parentElement;}
+        return '/'+parts.join('/');
     }
     function clickable(el){
         var n=el,guard=0;
-        while(n && n!==document.body && guard++<8){
-            var tag=(n.tagName||"").toLowerCase();
-            var role=(n.getAttribute&&n.getAttribute("role")||"").toLowerCase();
-            var ce=(n.getAttribute&&n.getAttribute("contenteditable")||"").toLowerCase();
-            if(tag==="button" || tag==="a" || tag==="input" || tag==="select" ||
-               tag==="textarea" || tag==="summary" || tag==="video" ||
-               role==="button" || role==="link" || role==="tab" || role==="menuitem" ||
-               n.onclick || n.getAttribute("onclick") || ce==="true") return n;
+        while(n&&n!==document.body&&guard++<10){
+            var tag=(n.tagName||'').toLowerCase(),role=(n.getAttribute&&n.getAttribute('role')||'').toLowerCase();
+            if(['button','a','input','select','textarea','summary','option'].indexOf(tag)>=0||['button','link','tab','menuitem'].indexOf(role)>=0||n.onclick||n.getAttribute('onclick')||n.getAttribute('data-action')||n.getAttribute('ng-click'))return n;
             n=n.parentElement;
         }
         return el;
     }
-    var dpr=window.devicePixelRatio||1;
-    var zoom=1;
-    try{zoom=window.visualViewport&&window.visualViewport.scale?window.visualViewport.scale:1;}catch(e){}
-    var candidates=[[Number(px),Number(py)]];
-    if(dpr!==1){candidates.push([Number(px)/dpr,Number(py)/dpr]);candidates.push([Number(px)*dpr,Number(py)*dpr]);}
-    if(zoom!==1){candidates.push([Number(px)/zoom,Number(py)/zoom]);candidates.push([Number(px)*zoom,Number(py)*zoom]);}
-    var el=null,used=null;
-    for(var i=0;i<candidates.length;i++){
-        var q=candidates[i], ex=q[0], ey=q[1];
-        if(ex>=0 && ey>=0 && ex<=window.innerWidth && ey<=window.innerHeight){
-            try{el=document.elementFromPoint(ex,ey);}catch(e){el=null;}
-            if(el){used=[ex,ey];break;}
-        }
+    function pointInDoc(doc,x,y){
+        try{
+            var el=doc.elementFromPoint(x,y);
+            if(!el)return null;
+            // 同源 iframe 内继续寻找真正的按钮/链接
+            if(el.tagName&&el.tagName.toLowerCase()==='iframe'){
+                try{
+                    var r=el.getBoundingClientRect();
+                    var inner=pointInDoc(el.contentDocument,x-r.left,y-r.top);
+                    if(inner)return inner;
+                }catch(e){}
+            }
+            return clickable(el);
+        }catch(e){return null;}
     }
-    if(!el) return {ok:false,selector:"",xpath:"",tag:"",text:"",
-                   x:Number(px),y:Number(py),reason:"网页坐标与CSS坐标不匹配"};
-    var target=clickable(el);
-    return {ok:true,selector:cssPath(target),xpath:xpath(target),
-            tag:(target.tagName||"").toLowerCase(),
-            text:String(target.innerText||target.textContent||"").trim().replace(/\s+/g," ").slice(0,120),
-            x:used?used[0]:Number(px),y:used?used[1]:Number(py),
-            dpr:dpr,zoom:zoom};
+    var dpr=window.devicePixelRatio||1, vv=1;
+    try{vv=window.visualViewport&&window.visualViewport.scale?window.visualViewport.scale:1;}catch(e){}
+    var candidates=[[+px,+py],[+px/dpr,+py/dpr],[+px*dpr,+py*dpr],[+px/vv,+py/vv],[+px*vv,+py*vv]];
+    var el=null,used=null;
+    for(var i=0;i<candidates.length&&!el;i++){
+        var q=candidates[i];
+        if(q[0]>=0&&q[1]>=0&&q[0]<=window.innerWidth&&q[1]<=window.innerHeight){el=pointInDoc(document,q[0],q[1]);if(el)used=q;}
+    }
+    if(!el)return {ok:false,selector:'',xpath:'',tag:'',text:'',x:+px,y:+py,reason:'找不到网页元素',debug:{dpr:dpr,zoom:vv,viewport:[window.innerWidth,window.innerHeight]}};
+    return {ok:true,selector:cssPath(el),xpath:xpath(el),tag:(el.tagName||'').toLowerCase(),text:String(el.innerText||el.textContent||'').trim().replace(/\s+/g,' ').slice(0,120),x:used?used[0]:+px,y:used?used[1]:+py,dpr:dpr,zoom:vv};
 })(%d,%d)
 """
 
 BACKGROUND_POINT_CLICK_SCRIPT = r"""
 (function(data){
-    function xp(path){
-        try{return document.evaluate(path,document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;}
-        catch(e){return null;}
+    function xp(doc,path){try{return doc.evaluate(path,doc,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;}catch(e){return null;}}
+    function css(doc,sel){try{return sel?doc.querySelector(sel):null;}catch(e){return null;}}
+    function find(doc){var el=css(doc,data.selector)||xp(doc,data.xpath);if(el)return el;
+        var dpr=window.devicePixelRatio||1,vv=1;try{vv=window.visualViewport&&window.visualViewport.scale?window.visualViewport.scale:1;}catch(e){}
+        var ps=[[+data.x,+data.y],[+data.x/dpr,+data.y/dpr],[+data.x*dpr,+data.y*dpr],[+data.x/vv,+data.y/vv],[+data.x*vv,+data.y*vv]];
+        for(var i=0;i<ps.length;i++){var p=ps[i];if(p[0]>=0&&p[1]>=0&&p[0]<=doc.documentElement.clientWidth&&p[1]<=doc.documentElement.clientHeight){try{el=doc.elementFromPoint(p[0],p[1]);}catch(e){el=null;}if(el){if(el.tagName&&el.tagName.toLowerCase()==='iframe'){try{var r=el.getBoundingClientRect();var inner=find(el.contentDocument);if(inner)return inner;}catch(e){}}return el;}}}
+        return null;
     }
-    function findElement(){
-        var el=null;
-        try{if(data.selector) el=document.querySelector(data.selector);}catch(e){}
-        if(!el && data.xpath) el=xp(data.xpath);
-        return el;
-    }
-    function clickable(el){
-        var n=el,guard=0;
-        while(n && n!==document.body && guard++<8){
-            var tag=(n.tagName||"").toLowerCase();
-            var role=(n.getAttribute&&n.getAttribute("role")||"").toLowerCase();
-            if(tag==="button"||tag==="a"||tag==="input"||tag==="select"||tag==="textarea"||
-               tag==="summary"||tag==="video"||role==="button"||role==="link"||
-               role==="tab"||role==="menuitem"||n.onclick||n.getAttribute("onclick")) return n;
-            n=n.parentElement;
-        }
-        return el;
-    }
-    var el=findElement();
-    var dpr=window.devicePixelRatio||1;
-    var zoom=1;
-    try{zoom=window.visualViewport&&window.visualViewport.scale?window.visualViewport.scale:1;}catch(e){}
-    var pts=[[Number(data.x),Number(data.y)]];
-    if(dpr!==1){pts.push([Number(data.x)/dpr,Number(data.y)/dpr]);pts.push([Number(data.x)*dpr,Number(data.y)*dpr]);}
-    if(zoom!==1){pts.push([Number(data.x)/zoom,Number(data.y)/zoom]);pts.push([Number(data.x)*zoom,Number(data.y)*zoom]);}
-    if(!el){
-        for(var i=0;i<pts.length;i++){
-            var p=pts[i];
-            if(p[0]>=0&&p[1]>=0&&p[0]<=window.innerWidth&&p[1]<=window.innerHeight){
-                try{el=document.elementFromPoint(p[0],p[1]);}catch(e){el=null;}
-                if(el){el=clickable(el);break;}
-            }
-        }
-    }
-    if(!el) return {ok:false,reason:"找不到网页点击元素，请重新拾取点位",debug:{dpr:dpr,zoom:zoom,viewport:[window.innerWidth,window.innerHeight]}};
-
-    try{el.scrollIntoView({block:"nearest",inline:"nearest"});}catch(e){}
-    var r=null;
-    try{r=el.getBoundingClientRect();}catch(e){}
-    var cx=r ? r.left+r.width/2 : Number(data.x);
-    var cy=r ? r.top+r.height/2 : Number(data.y);
-
-    // 先执行原生 DOM click。对按钮、链接、表单控件兼容性最好。
-    var clicked=false, method="";
-    try{
-        if(typeof el.click==="function"){
-            el.click();
-            clicked=true;
-            method="HTMLElement.click";
-        }
-    }catch(e){}
-
-    // 某些前端框架监听 Pointer/Mouse 事件，再补发一组事件。
-    function fire(type, Ctor, buttons){
-        try{
-            var ev=new Ctor(type,{bubbles:true,cancelable:true,composed:true,
-                view:window,clientX:cx,clientY:cy,button:0,buttons:buttons||0,
-                pointerId:1,pointerType:"mouse",isPrimary:true});
-            el.dispatchEvent(ev);
-        }catch(e){}
-    }
-    try{fire("pointerover",PointerEvent,0);fire("mouseover",MouseEvent,0);}catch(e){}
-    try{fire("pointerdown",PointerEvent,1);fire("mousedown",MouseEvent,1);
-        fire("pointerup",PointerEvent,0);fire("mouseup",MouseEvent,0);}catch(e){}
-    try{
-        el.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,composed:true,
-            view:window,clientX:cx,clientY:cy,button:0,buttons:0}));
-        clicked=true;
-        if(!method) method="MouseEvent.click";
-    }catch(e){}
-
-    return {ok:clicked,method:method,tag:(el.tagName||"").toLowerCase(),
-        text:String(el.innerText||el.textContent||"").trim().replace(/\s+/g," ").slice(0,80),
-        selector:data.selector||"",x:cx,y:cy,dpr:dpr,zoom:zoom};
+    var el=find(document);
+    if(!el)return {ok:false,reason:'找不到目标元素',debug:{selector:data.selector||'',xpath:data.xpath||'',x:data.x,y:data.y,url:location.href}};
+    try{el.scrollIntoView({block:'nearest',inline:'nearest'});}catch(e){}
+    var r=null;try{r=el.getBoundingClientRect();}catch(e){}
+    var cx=r?r.left+r.width/2:+data.x,cy=r?r.top+r.height/2:+data.y;
+    var fired=[];
+    function ev(type,ctor,buttons){try{el.dispatchEvent(new ctor(type,{bubbles:true,cancelable:true,composed:true,view:window,clientX:cx,clientY:cy,button:0,buttons:buttons||0}));fired.push(type);}catch(e){}}
+    try{if(typeof el.click==='function'){el.click();fired.push('click');}}catch(e){}
+    try{ev('pointerover',PointerEvent,0);ev('mouseover',MouseEvent,0);ev('pointerdown',PointerEvent,1);ev('mousedown',MouseEvent,1);ev('pointerup',PointerEvent,0);ev('mouseup',MouseEvent,0);ev('click',MouseEvent,0);}catch(e){}
+    return {ok:fired.length>0,method:fired.join(','),tag:(el.tagName||'').toLowerCase(),text:String(el.innerText||el.textContent||'').trim().replace(/\s+/g,' ').slice(0,80),selector:data.selector||'',x:cx,y:cy,url:location.href};
 })(%s)
 """
 
