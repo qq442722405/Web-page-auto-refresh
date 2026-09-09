@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V24.2 - 后台点击修复版)
+网页刷新数字监控 (V24.2 - 前台点击稳定版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
@@ -672,7 +672,7 @@ class _OCRRequestProxy(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V24.2 - 后台点击修复版)")
+        self.setWindowTitle("网页刷新数字监控 (V24.2 - 前台点击稳定版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -779,7 +779,7 @@ class MainWindow(QMainWindow):
         h_action.addWidget(QLabel("到时操作:"))
         self.operation_action_combo = QComboBox()
         self.operation_action_combo.addItem("🔄 刷新网页", "refresh")
-        self.operation_action_combo.addItem("🖱️ 后台点击拾取点位", "click")
+        self.operation_action_combo.addItem("🖱️ 前台点击拾取点位", "click")
         current_action = self.config.get("operation_action", "refresh")
         idx = self.operation_action_combo.findData(current_action)
         if idx >= 0:
@@ -1696,16 +1696,15 @@ class MainWindow(QMainWindow):
         self.log("📍 已进入点位拾取模式，请在网页上点击需要自动操作的位置")
 
     def on_point_selected(self, point):
-        # 保存网页视图内部坐标，并同时记录该位置当前对应的 DOM 元素。
-        # 执行时优先对元素发送完整的 Pointer/Mouse 事件，不移动系统鼠标。
+        # 保存网页视图内部坐标。执行时转换为屏幕坐标并进行真实前台鼠标点击。
         self.click_point = [point.x(), point.y()]
         self.config["click_point_space"] = "webview_local"
         self.click_point_label.setText(self.format_click_point())
         self.pick_point_btn.setText("📍 重新拾取点位")
         self.operation_action_combo.setCurrentIndex(max(0, self.operation_action_combo.findData("click")))
         self.log(f"📍 已拾取网页点位: ({point.x()}, {point.y()})")
-        self.status_label.setText(f"正在记录点击目标 ({point.x()}, {point.y()})...")
-        self._capture_background_click_target(point.x(), point.y())
+        self.status_label.setText(f"已设置前台点击点位 ({point.x()}, {point.y()})")
+        self.save_settings()
 
     def _native_click_screen(self, x, y):
         """在 Windows 上对真实屏幕坐标执行鼠标左键点击。
@@ -1744,32 +1743,23 @@ class MainWindow(QMainWindow):
         self.save_settings()
 
     def perform_background_point_click(self):
+        """兼容旧配置名称，但实际执行真实前台鼠标点击。"""
         if len(getattr(self, "click_point", [])) < 2:
-            self.log("⚠️ 后台点击点位尚未拾取")
+            self.log("⚠️ 点击点位尚未拾取")
             self.status_label.setText("⚠️ 请先拾取点击点位")
             return
-        x, y = int(self.click_point[0]), int(self.click_point[1])
-        selector = getattr(self, "click_target_selector", "") or ""
-        xpath = getattr(self, "click_target_xpath", "") or ""
-        payload = json.dumps({"x": x, "y": y, "selector": selector, "xpath": xpath}, ensure_ascii=False)
-        js = BACKGROUND_POINT_CLICK_SCRIPT % payload
-        self.webview.page().runJavaScript(js, lambda r: self._background_point_click_done(r, x, y))
-
-    def _background_point_click_done(self, result, x, y):
-        if isinstance(result, dict) and result.get("ok"):
-            self.log(f"🖱️ 后台点击成功: ({x}, {y})，未移动系统鼠标")
-            self.status_label.setText(f"🖱️ 后台点击成功 ({x}, {y})")
-        else:
-            if isinstance(result, dict):
-                reason = result.get("reason", "未知错误")
-                debug = result.get("debug", "")
-                self.log(f"⚠️ 后台点击失败: {reason}")
-                if debug:
-                    self.log(f"   调试信息: {debug}")
-            else:
-                reason = str(result)
-                self.log(f"⚠️ 后台点击失败: {reason}")
-            self.status_label.setText(f"⚠️ 后台点击失败: {reason}")
+        try:
+            local_x, local_y = int(self.click_point[0]), int(self.click_point[1])
+            # click_point 是 QWebEngineView 内部坐标，必须转换为 Windows 屏幕坐标。
+            global_pos = self.webview.mapToGlobal(QPoint(local_x, local_y))
+            sx, sy = int(global_pos.x()), int(global_pos.y())
+            self.log(f"🖱️ 执行前台真实点击: 网页坐标=({local_x},{local_y}) 屏幕坐标=({sx},{sy})")
+            self._native_click_screen(sx, sy)
+            self.log(f"🖱️ 前台点击成功: ({sx}, {sy})")
+            self.status_label.setText(f"🖱️ 前台点击成功 ({local_x}, {local_y})")
+        except Exception as e:
+            self.log(f"⚠️ 前台点击失败: {e}")
+            self.status_label.setText(f"⚠️ 前台点击失败: {e}")
 
     def perform_scheduled_operation(self):
         action = self.operation_action_combo.currentData()
