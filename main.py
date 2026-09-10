@@ -1,5 +1,5 @@
 import sys, ctypes, json, time
-from PySide6.QtCore import Qt, QPoint, QTimer, QUrl
+from PySide6.QtCore import Qt, QPoint, QTimer, QUrl, QEvent
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QLabel, QTextEdit, QSpinBox
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
@@ -20,24 +20,41 @@ class TestWindow(QMainWindow):
             b=QPushButton(f'测试方案 {i}'); b.clicked.connect(lambda _, n=i:self.test(n)); row2.addWidget(b)
         self.web=QWebEngineView(); lay.addWidget(self.web,1)
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(150); lay.addWidget(self.log)
-        self.web.installEventFilter(self)
+        QApplication.instance().installEventFilter(self)
         self.web.loadFinished.connect(lambda ok:self.logmsg('页面加载 '+('成功' if ok else '失败')))
         self.load()
     def logmsg(self,s): self.log.append(time.strftime('%H:%M:%S')+' '+s)
     def load(self): self.web.load(QUrl(self.url.text().strip())); self.logmsg('加载: '+self.url.text().strip())
     def pick_point(self):
-        self.pick=None; self.status.setText('请在网页上点击要测试的位置（ESC取消）'); self.logmsg('进入拾取模式')
-        self.web.setCursor(Qt.CrossCursor); self.picking=True
-    def eventFilter(self,obj,e):
-        if obj is self.web and getattr(self,'picking',False):
-            if e.type()==e.Type.MouseButtonPress and e.button()==Qt.LeftButton:
-                pos=e.position().toPoint(); self.pick=(pos.x(),pos.y()); self.picking=False; self.web.unsetCursor()
-                self.status.setText(f'已拾取 Web坐标: {self.pick}')
-                self.logmsg(f'拾取位置 {self.pick}')
+        self.pick = None
+        self.picking = True
+        self.status.setText('请在网页上点击要测试的位置（ESC取消）')
+        self.logmsg('进入拾取模式：请点击网页目标位置')
+        self.web.setCursor(Qt.CrossCursor)
+
+    def eventFilter(self, obj, e):
+        if getattr(self, 'picking', False):
+            if e.type() == QEvent.Type.MouseButtonPress and e.button() == Qt.MouseButton.LeftButton:
+                try:
+                    gp = e.globalPosition().toPoint()
+                except AttributeError:
+                    gp = e.globalPos()
+                vp = self.web.mapFromGlobal(gp)
+                if self.web.rect().contains(vp):
+                    self.pick = (vp.x(), vp.y())
+                    self.picking = False
+                    self.web.unsetCursor()
+                    self.status.setText(f'已拾取 Web坐标: {self.pick}')
+                    self.logmsg(f'拾取位置成功: Web坐标 {self.pick}')
+                    return True
+            elif e.type() == QEvent.Type.KeyPress and e.key() == Qt.Key.Key_Escape:
+                self.picking = False
+                self.web.unsetCursor()
+                self.status.setText('已取消拾取')
+                self.logmsg('取消拾取')
                 return True
-            if e.type()==e.Type.KeyPress and e.key()==Qt.Key_Escape:
-                self.picking=False; self.web.unsetCursor(); self.logmsg('取消拾取'); return True
-        return super().eventFilter(obj,e)
+        return super().eventFilter(obj, e)
+
     def test(self,n):
         if not self.pick: self.logmsg('请先拾取位置'); return
         x,y=self.pick; self.logmsg(f'开始测试方案 {n}: {x},{y}')
