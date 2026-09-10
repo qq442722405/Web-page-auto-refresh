@@ -1,4 +1,4 @@
-name: Windows 在线打包
+name: Windows Online Build
 
 on:
   workflow_dispatch:
@@ -10,54 +10,67 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
-      - name: 检出代码
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装 Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: bgclick_test/requirements.txt
 
-      - name: 升级打包工具
+      - name: Install build tools
         working-directory: bgclick_test
-        run: python -m pip install --upgrade pip setuptools wheel
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
 
-      - name: 安装依赖
-        working-directory: bgclick_test
-        run: python -m pip install -r requirements.txt
-
-      - name: 检查 Python 语法
+      - name: Check syntax
         working-directory: bgclick_test
         run: python -m py_compile main.py
 
-      - name: PyInstaller 打包
+      - name: Build EXE
         working-directory: bgclick_test
         shell: cmd
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name="后台鼠标点击测试工具" main.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name=BackendMouseClickTest main.py
+
+      - name: Verify build
+        shell: powershell
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "bgclick_test\dist\BackendMouseClickTest\BackendMouseClickTest.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            Write-Error "PyInstaller EXE not found"
+            Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE "bgclick_test\dist") -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          Write-Host "Build OK: $exe"
 
       - name: Create ZIP
         shell: powershell
         run: |
-          $exeDir = Join-Path $env:GITHUB_WORKSPACE "bgclick_test\dist\后台鼠标点击测试工具"
-          if (-not (Test-Path -LiteralPath $exeDir)) {
-            Write-Error "PyInstaller output directory not found"
+          $exeDir = Join-Path $env:GITHUB_WORKSPACE "bgclick_test\dist\BackendMouseClickTest"
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "后台鼠标点击测试工具-Windows.zip"
+          if (Test-Path -LiteralPath $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Compress-Archive -Path (Join-Path $exeDir "*") -DestinationPath $zipPath -Force
+          if (-not (Test-Path -LiteralPath $zipPath)) {
+            Write-Error "ZIP was not created"
             exit 1
           }
-          $zipPath = Join-Path $env:GITHUB_WORKSPACE "后台鼠标点击测试工具-Windows.zip"
-          Compress-Archive -Path (Join-Path $exeDir "*") -DestinationPath $zipPath -Force
 
-      - name: 上传 EXE 文件夹
+      - name: Upload EXE folder
         uses: actions/upload-artifact@v4
         with:
           name: backend-mouse-click-test-windows
-          path: bgclick_test/dist/后台鼠标点击测试工具
+          path: bgclick_test/dist/BackendMouseClickTest
           if-no-files-found: error
 
-      - name: 上传 ZIP
+      - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
           name: backend-mouse-click-test-zip
