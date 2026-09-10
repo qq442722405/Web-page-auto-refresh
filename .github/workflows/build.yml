@@ -39,14 +39,16 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name="后台鼠标点击测试工具" main.py
 
-      - name: 打包 ZIP
+      - name: Create ZIP
         shell: powershell
         run: |
-          if (Test-Path "bgclick_test\dist\后台鼠标点击测试工具") {
-            Compress-Archive -Path "bgclick_test\dist\后台鼠标点击测试工具\*" -DestinationPath "后台鼠标点击测试工具-Windows.zip" -Force
-          } else {
-            Write-Error "PyInstaller 输出目录不存在"
+          $exeDir = Join-Path $env:GITHUB_WORKSPACE "bgclick_test\dist\后台鼠标点击测试工具"
+          if (-not (Test-Path -LiteralPath $exeDir)) {
+            Write-Error "PyInstaller output directory not found"
+            exit 1
           }
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "后台鼠标点击测试工具-Windows.zip"
+          Compress-Archive -Path (Join-Path $exeDir "*") -DestinationPath $zipPath -Force
 
       - name: 上传 EXE 文件夹
         uses: actions/upload-artifact@v4
