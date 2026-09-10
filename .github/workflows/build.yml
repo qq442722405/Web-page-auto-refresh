@@ -8,10 +8,10 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -29,10 +29,9 @@ jobs:
         shell: powershell
         run: |
           python -m py_compile main.py
-          Write-Host "Source check OK"
 
-      - name: Build Windows EXE
-        shell: powershell
+      - name: Build EXE
+        shell: cmd
         run: |
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name BackendMouseClickTest main.py
 
@@ -45,26 +44,33 @@ jobs:
             Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE "dist") -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
             exit 1
           }
-          Write-Host "EXE found: $exe"
+          Write-Host "EXE build OK"
 
       - name: Create ZIP
         shell: powershell
         run: |
           $dir = Join-Path $env:GITHUB_WORKSPACE "dist\BackendMouseClickTest"
-          $zip = Join-Path $env:GITHUB_WORKSPACE "后台鼠标点击测试工具-Windows.zip"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "BackendMouseClickTest-Windows.zip"
+          if (Test-Path -LiteralPath $zip) {
+            Remove-Item -LiteralPath $zip -Force
+          }
           Compress-Archive -Path (Join-Path $dir "*") -DestinationPath $zip -Force
+          if (-not (Test-Path -LiteralPath $zip)) {
+            Write-Error "ZIP creation failed"
+            exit 1
+          }
           Write-Host "ZIP created: $zip"
 
-      - name: Upload EXE
+      - name: Upload Windows EXE
         uses: actions/upload-artifact@v4
         with:
           name: BackendMouseClickTest-Windows
           path: dist/BackendMouseClickTest
           if-no-files-found: error
 
-      - name: Upload ZIP
+      - name: Upload Windows ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: 后台鼠标点击测试工具-Windows-ZIP
-          path: 后台鼠标点击测试工具-Windows.zip
+          name: BackendMouseClickTest-Windows-ZIP
+          path: BackendMouseClickTest-Windows.zip
           if-no-files-found: error
