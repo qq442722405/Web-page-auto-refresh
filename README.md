@@ -15,3 +15,8 @@
 - 方案4：Windows `PostMessage(WM_MOUSEMOVE/WM_LBUTTONDOWN/UP)`，不移动真实鼠标
 
 如果方案4仍不能触发，说明 QWebEngine/Chromium 子窗口不接受这种消息，需要换更底层的输入注入或针对网页事件做专门适配。
+
+
+## 本版新增
+- 方案5：枚举 QWebEngineView 的 Chromium 子窗口，向命中的子窗口发送 Windows WM_MOUSE 消息。
+- 方案6：真实移动系统鼠标点击后恢复原位置，用于判断网页是否必须依赖真实系统输入。
