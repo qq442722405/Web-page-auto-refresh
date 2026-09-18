@@ -30,7 +30,14 @@ jobs:
       - name: Check Python syntax
         shell: cmd
         run: |
-          python -m py_compile main.py
+          python -m py_compile main.py background_click.py
+          python -m unittest discover -s tests -v
+
+      - name: DOM integration tests with installed Edge
+        shell: cmd
+        run: |
+          python -m pip install playwright
+          python tests/test_browser.py
 
       - name: Build onedir EXE
         shell: cmd
@@ -53,7 +60,8 @@ jobs:
       - name: Copy runtime files
         shell: cmd
         run: |
-          copy /Y "日志.TXT" "dist\网页刷新数字监控\日志.TXT"
+          if exist "日志.TXT" copy /Y "日志.TXT" "dist\网页刷新数字监控\日志.TXT"
+          copy /Y "README.md" "dist\网页刷新数字监控\README.md"
           copy /Y "1.ico" "dist\网页刷新数字监控\1.ico"
 
       - name: Upload artifact
