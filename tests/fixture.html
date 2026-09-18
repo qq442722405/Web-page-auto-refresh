@@ -1,0 +1,12 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>后台点击测试页</title>
+<style>body{font:18px sans-serif;padding:24px}button,a{padding:12px;margin:8px;display:inline-block}iframe{display:block;width:500px;height:160px;border:8px solid #aaa}#spacer{height:1000px}</style>
+<h1>后台 DOM 单次点击测试</h1><p>按钮、链接、嵌套文字、滚动和同源/跨源框架。计数不会改变目标文字。</p>
+<button id="button" onclick="counts.button++;render()"><span id="nested">嵌套按钮文字</span></button>
+<a id="link" href="#anchor" onclick="counts.link++;render()">链接</a>
+<button id="disabled" disabled>禁用按钮</button><button id="lost">待删除目标</button>
+<canvas id="canvas" width="120" height="60" style="background:#ccc"></canvas>
+<pre id="counts"></pre>
+<iframe id="same" srcdoc="<button id='inner' onclick='window.count=(window.count||0)+1'>同源按钮</button>"></iframe>
+<iframe id="cross" sandbox="allow-scripts" srcdoc="<button>隔离源按钮</button>"></iframe>
+<div id="spacer"></div><button id="scrolled" onclick="counts.scrolled++;render()">滚动后按钮</button>
+<script>window.counts={button:0,link:0,scrolled:0};function render(){document.querySelector('#counts').textContent=JSON.stringify(counts)}render()</script></html>
