@@ -33,10 +33,9 @@ jobs:
           python -m py_compile main.py background_click.py
           python -m unittest discover -s tests -v
 
-      - name: DOM integration tests with installed Edge
+      - name: Qt WebEngine background coordinate integration tests
         shell: cmd
         run: |
-          python -m pip install playwright
           python tests/test_browser.py
 
       - name: Build onedir EXE
