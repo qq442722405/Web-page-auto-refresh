@@ -1,12 +1,15 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>后台点击测试页</title>
-<style>body{font:18px sans-serif;padding:24px}button,a{padding:12px;margin:8px;display:inline-block}iframe{display:block;width:500px;height:160px;border:8px solid #aaa}#spacer{height:1000px}</style>
-<h1>后台 DOM 单次点击测试</h1><p>按钮、链接、嵌套文字、滚动和同源/跨源框架。计数不会改变目标文字。</p>
-<button id="button" onclick="counts.button++;render()"><span id="nested">嵌套按钮文字</span></button>
-<a id="link" href="#anchor" onclick="counts.link++;render()">链接</a>
-<button id="disabled" disabled>禁用按钮</button><button id="lost">待删除目标</button>
-<canvas id="canvas" width="120" height="60" style="background:#ccc"></canvas>
-<pre id="counts"></pre>
-<iframe id="same" srcdoc="<button id='inner' onclick='window.count=(window.count||0)+1'>同源按钮</button>"></iframe>
-<iframe id="cross" sandbox="allow-scripts" srcdoc="<button>隔离源按钮</button>"></iframe>
-<div id="spacer"></div><button id="scrolled" onclick="counts.scrolled++;render()">滚动后按钮</button>
-<script>window.counts={button:0,link:0,scrolled:0};function render(){document.querySelector('#counts').textContent=JSON.stringify(counts)}render()</script></html>
+﻿<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>后台坐标点击测试页</title>
+<style>body{font:16px sans-serif;margin:0}button,a{padding:12px;display:inline-block}#button{position:absolute;left:40px;top:40px;width:180px;height:60px}#canvas{position:absolute;left:250px;top:40px;background:#ccc}#shadow{position:absolute;left:420px;top:40px}iframe{position:absolute;left:40px;top:150px;width:320px;height:120px;border:8px solid #aaa}#cross{left:400px}#counts{position:absolute;left:40px;top:300px}#scrolled{position:absolute;left:40px;top:1400px}</style>
+<button id="button"><span>按钮文字</span></button>
+<canvas id="canvas" width="120" height="60"></canvas><div id="shadow"></div>
+<iframe id="same" srcdoc="<style>body{margin:0}button{width:160px;height:60px}</style><button onclick=&quot;parent.postMessage('same','*')&quot;>同源按钮</button>"></iframe>
+<iframe id="cross" sandbox="allow-scripts" srcdoc="<style>body{margin:0}button{width:160px;height:60px}</style><button onclick=&quot;parent.postMessage('cross','*')&quot;>隔离源按钮</button>"></iframe>
+<pre id="counts"></pre><button id="scrolled">滚动后按钮</button>
+<script>
+window.counts={button:0,canvas:0,shadow:0,same:0,cross:0,scrolled:0};window.events=[];
+function render(){document.querySelector('#counts').textContent=JSON.stringify(counts,null,2)}
+for(const id of ['button','canvas','scrolled']) document.getElementById(id).addEventListener('click',()=>{counts[id]++;render()});
+for(const type of ['pointerdown','mousedown','pointerup','mouseup','click'])document.getElementById('button').addEventListener(type,e=>events.push({type:e.type,trusted:e.isTrusted,x:e.clientX,y:e.clientY}));
+const root=document.getElementById('shadow').attachShadow({mode:'closed'});root.innerHTML='<button style="width:160px;height:60px">Shadow DOM</button>';root.firstChild.onclick=()=>{counts.shadow++;render()};
+window.addEventListener('message',e=>{if(e.data==='same'||e.data==='cross'){counts[e.data]++;render()}});render();
+</script></html>

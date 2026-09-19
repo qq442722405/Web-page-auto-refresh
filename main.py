@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-网页刷新数字监控 (V24.2 - 前台点击稳定版)
+网页刷新数字监控 (V24.4 - 前后台坐标点击版)
 更新日志：
  1. 取消各监视窗口单框齿轮，界面保持简洁。
  2. 屏幕右上角常驻全局控制栏：
@@ -23,7 +23,7 @@ import glob
 import subprocess
 import threading
 import urllib.parse
-from background_click import OperationGate, make_script, TIMEOUT_MS, valid_target
+from background_click import OperationGate, send_background_click
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import numpy as np
@@ -678,7 +678,7 @@ class _OCRRequestProxy(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网页刷新数字监控 (V24.2 - 前台点击稳定版)")
+        self.setWindowTitle("网页刷新数字监控 (V24.4 - 前后台坐标点击版)")
         self.resize(1380, 880)
         self.config = load_config()
 
@@ -709,13 +709,9 @@ class MainWindow(QMainWindow):
         saved_roi_list = self.config.get("roi_list", [[100, 100, 300, 200]])
         self.roi_list = [QRect(r[0], r[1], r[2], r[3]) for r in saved_roi_list]
         self.click_point = list(self.config.get("click_point", []))
-        self.background_target = self.config.get("background_target")
-        if not valid_target(self.background_target):
-            self.background_target = None
+        # Both modes share the same viewport coordinate. Old DOM targets are obsolete.
+        self.config.pop("background_target", None)
         self.operation_gate = OperationGate()
-        self.dom_timeout = QTimer(self)
-        self.dom_timeout.setSingleShot(True)
-        self.dom_timeout.timeout.connect(self.on_dom_timeout)
         self.picker_action = None
         # Chromium may consume Escape, so handle cancellation at window scope.
         self.cancel_picker_shortcut = QShortcut(QKeySequence('Escape'), self)
@@ -805,7 +801,7 @@ class MainWindow(QMainWindow):
         self.operation_action_combo = QComboBox()
         self.operation_action_combo.addItem("🔄 刷新网页", "refresh")
         self.operation_action_combo.addItem("前台点击（移动鼠标）", "click")
-        self.operation_action_combo.addItem("后台点击（网页元素）", "background_click")
+        self.operation_action_combo.addItem("后台点击（不移动鼠标）", "background_click")
         current_action = self.config.get("operation_action", "refresh")
         idx = self.operation_action_combo.findData(current_action)
         if idx >= 0:
@@ -1195,7 +1191,7 @@ class MainWindow(QMainWindow):
         self.control_bar.raise_()
 
     def on_zoom_changed(self, value):
-        self.cancel_dom_operation('网页缩放改变')
+        self.cancel_operation('网页缩放改变')
         factor = value / 100.0
         self.webview.setZoomFactor(factor)
         self.config["zoom_level"] = factor
@@ -1209,7 +1205,7 @@ class MainWindow(QMainWindow):
         self.webview.load(QUrl(url))
 
     def on_load_started(self):
-        self.cancel_dom_operation('页面开始导航')
+        self.cancel_operation('页面开始导航')
         if hasattr(self, 'refresh_clock'):
             self.refresh_clock.stop()
         self.web_loading = True
@@ -1658,7 +1654,6 @@ class MainWindow(QMainWindow):
         self.config["operation_interval"] = self.operation_interval.value()
         self.config["operation_action"] = self.operation_action_combo.currentData()
         self.config["click_point"] = list(self.click_point) if getattr(self, "click_point", None) else []
-        self.config["background_target"] = self.background_target
         self.config["click_point_space"] = "webview_local"
         self.config["selected_ip"] = self.ip_combo.currentText() 
         self.config["reminder_sound_index"] = self.sound_combo.currentIndex()
@@ -1707,7 +1702,7 @@ class MainWindow(QMainWindow):
         self.update_top_right_countdown_bar()
 
     def stop_auto_timer(self):
-        self.cancel_dom_operation('自动操作已停止')
+        self.cancel_operation('自动操作已停止')
         self.refresh_clock.stop()
         self.countdown_label.setText("")
         self.log("⏹️ 自动操作已停止")
@@ -1731,14 +1726,10 @@ class MainWindow(QMainWindow):
         busy = self.operation_gate.pending is not None
         self.pick_point_btn.setEnabled(action != "refresh" and not busy)
         self.test_operation_btn.setEnabled(not busy)
-        self.pick_point_btn.setText("拾取网页元素" if action == "background_click" else "拾取前台点位")
-        if action == "background_click":
-            target = self.background_target or {}
-            fp = target.get("locator", {}).get("fingerprint", {})
-            summary = f"<{fp.get('tag', '?')}> {fp.get('text', '')[:60]} / {len(target.get('frames', []))} 层框架"
-            self.click_point_label.setText("后台目标: " + (summary if target else "未设置，请重新拾取"))
-        elif action == "click":
-            self.click_point_label.setText(self.format_click_point() + "（执行时移动系统鼠标）")
+        self.pick_point_btn.setText("拾取点击点位")
+        if action in ("background_click", "click"):
+            hint = "（后台执行，不移动系统鼠标）" if action == "background_click" else "（执行时移动系统鼠标）"
+            self.click_point_label.setText(self.format_click_point() + hint)
         else:
             self.click_point_label.setText("刷新网页；不需要点击目标")
 
@@ -1747,10 +1738,9 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         self.log(message)
 
-    def cancel_dom_operation(self, reason):
+    def cancel_operation(self, reason):
         was_pending = self.operation_gate.pending is not None
         self.operation_gate.cancel()
-        self.dom_timeout.stop()
         self.picker_action = None
         if hasattr(self, 'roi_overlay') and self.roi_overlay.is_picking_point:
             self.roi_overlay.finish_point_picker()
@@ -1759,7 +1749,7 @@ class MainWindow(QMainWindow):
             self.operation_feedback(reason + "；已发出的点击不可撤销，结果可能未知")
 
     def on_operation_mode_changed(self, *_):
-        self.cancel_dom_operation("操作模式已切换")
+        self.cancel_operation("操作模式已切换")
         # Explicit restart required: a new mode must not inherit a nearly-expired timer.
         if self.auto_operation_cb.isChecked():
             self.auto_operation_cb.setChecked(False)
@@ -1767,7 +1757,7 @@ class MainWindow(QMainWindow):
 
     def cancel_point_picker(self):
         if self.picker_action is not None:
-            self.cancel_dom_operation('已取消拾取')
+            self.cancel_operation('已取消拾取')
             self.operation_feedback('已取消拾取')
 
     def start_point_picker(self):
@@ -1775,13 +1765,10 @@ class MainWindow(QMainWindow):
             self.operation_feedback("页面加载中，请稍后拾取")
             return
         self.auto_operation_cb.setChecked(False)
-        self.cancel_dom_operation("重新拾取")
+        self.cancel_operation("重新拾取")
         self.picker_action = self.operation_action_combo.currentData()
-        if self.picker_action == "background_click":
-            self.background_target = None
-            self.config['background_target'] = None
-            save_config(self.config)
-        elif self.picker_action != "click":
+        if self.picker_action not in ("click", "background_click"):
+            self.picker_action = None
             return
         self.update_operation_ui()
         if self.settings_open:
@@ -1794,14 +1781,15 @@ class MainWindow(QMainWindow):
         self.picker_action = None
         if action != self.operation_action_combo.currentData():
             return
-        if action == "background_click":
-            self._capture_background_click_target(point.x(), point.y())
-        elif action == "click":
+        if action in ("click", "background_click"):
+            if not self.webview.rect().contains(point):
+                self.operation_feedback("点位不在网页区域内，请重新拾取")
+                return
             self.click_point = [point.x(), point.y()]
             self.config["click_point_space"] = "webview_local"
             self.update_operation_ui()
             self.save_settings()
-            self.operation_feedback(f"已设置前台点位 ({point.x()}, {point.y()})")
+            self.operation_feedback(f"已设置点击点位 ({point.x()}, {point.y()})；前后台共用")
 
     def _native_click_screen(self, x, y):
         """在 Windows 上对真实屏幕坐标执行鼠标左键点击。
@@ -1822,58 +1810,27 @@ class MainWindow(QMainWindow):
         local = self.webview.mapFromGlobal(QPoint(int(x), int(y)))
         QTest.mouseClick(self.webview, Qt.LeftButton, Qt.NoModifier, local)
 
-    def _capture_background_click_target(self, x, y):
-        self.run_dom_operation('capture', point={
-            'x': x, 'y': y, 'width': self.webview.width(),
-            'zoom': self.webview.zoomFactor()})
-
-    def run_dom_operation(self, kind, **kwargs):
+    def perform_background_point_click(self):
         if self.web_loading or getattr(self, '_quitting', False):
             self.operation_feedback("页面加载中或程序退出中，未执行")
             return
-        ticket = self.operation_gate.begin(kind)
+        if len(self.click_point) < 2:
+            self.operation_feedback("请先拾取点击点位")
+            return
+        ticket = self.operation_gate.begin('background_click')
         if ticket is None:
-            self.operation_feedback("上一项后台操作尚未完成，跳过重入")
+            self.operation_feedback("上一项操作尚未完成，跳过重复操作")
             return
-        self.update_operation_ui()
-        self.operation_feedback("正在拾取元素..." if kind == 'capture' else "正在触发后台点击...")
-        self.dom_timeout.start(TIMEOUT_MS)
         try:
-            script = make_script(kind, **kwargs)
-            self.webview.page().runJavaScript(script, lambda result: self.on_dom_result(ticket, result))
+            point = QPoint(int(self.click_point[0]), int(self.click_point[1]))
+            send_background_click(self.webview, point)
+            self.operation_feedback(f"已发送后台点击 ({point.x()}, {point.y()})，请确认网页结果")
         except Exception as exc:
-            self.on_dom_result(ticket, {'ok': False, 'reason': str(exc)})
-
-    def on_dom_result(self, ticket, result):
-        if getattr(self, '_quitting', False) or not self.operation_gate.finish(ticket):
-            return
-        self.dom_timeout.stop()
-        if not isinstance(result, dict):
-            result = {'ok': False, 'reason': '脚本未返回结果；点击状态未知，请检查页面'}
-        if result.get('ok') and ticket[1] == 'capture':
-            target = result.get('target')
-            if valid_target(target):
-                self.background_target = target
-                self.save_settings()
-                message = '已保存后台元素目标；请用“测试一次”验证'
-            else:
-                message = '拾取返回无效，请重新拾取'
-        else:
-            message = result.get('reason', '后台操作失败')
-        self.update_operation_ui()
-        self.operation_feedback(message)
-
-    def on_dom_timeout(self):
-        self.cancel_dom_operation('后台操作超时')
-        # Never retry an unknown click automatically: it may already have fired.
-        self.auto_operation_cb.setChecked(False)
-        self.operation_feedback('后台操作超时，结果未知，自动操作已停止；请检查网页后再试')
-
-    def perform_background_point_click(self):
-        if not self.background_target:
-            self.operation_feedback('请先拾取后台网页元素；旧点位不能用作后台目标')
-            return
-        self.run_dom_operation('click', target=self.background_target)
+            self.auto_operation_cb.setChecked(False)
+            self.operation_feedback(f"后台点击失败，自动操作已停止：{exc}")
+        finally:
+            self.operation_gate.finish(ticket)
+            self.update_operation_ui()
 
     def perform_foreground_point_click(self):
         """旧 click 配置保持真实前台鼠标点击语义。"""
@@ -1911,7 +1868,7 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and self.picker_action is not None:
-            self.cancel_dom_operation('已取消拾取')
+            self.cancel_operation('已取消拾取')
             self.operation_feedback('已取消拾取')
             event.accept()
         elif event.key() == Qt.Key_F11:
@@ -1940,7 +1897,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_quitting", False):
             return
         self._quitting = True
-        self.cancel_dom_operation('程序正在退出')
+        self.cancel_operation('程序正在退出')
         _write_runtime_log("程序开始执行正常退出流程")
         try:
             if hasattr(self, 'refresh_clock'): self.refresh_clock.stop()

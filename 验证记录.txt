@@ -1,0 +1,35 @@
+﻿网页刷新数字监控 V24.4 验证记录
+日期：2026-09-19
+
+修复内容
+1. 前台、后台共用 click_point（网页控件局部坐标）。
+2. 后台取点直接保存坐标，不再查询网页元素或保存 DOM 指纹。
+3. 后台执行向 Chromium render widget 发送移动、左键按下、左键松开。
+4. 后台不调用系统 SetCursorPos/mouse_event，不激活或提升软件窗口。
+5. 越界、输入控件未就绪或异常时停止自动操作；不回退为前台点击。
+
+已通过
+- Python 全部源码语法编译。
+- 9 项无外部依赖回归测试：前后台共用点位、取点保存、取消/越界保留原点位、分发、重入保护、加载中跳过、切模式停止、异常停止、不回退系统鼠标。
+- PySide6 6.9.3 / Python 3.12.14 / Windows 的实际 Qt WebEngine 测试：
+  DPR=1.0：40 项检查通过。
+  DPR=1.5：40 项检查通过。
+- 实际项目取点浮层：保存坐标准确，不误触网页，取点后恢复鼠标穿透。
+- pointerdown/mousedown/pointerup/mouseup/click 顺序完整，浏览器事件 isTrusted 为 true。
+- 按钮每次计数恰好增加 1；目标文字变化后同坐标仍能点击。
+- canvas、封闭 Shadow DOM、同源 iframe、隔离源 sandbox iframe 均收到点击。
+- 浏览器缩放 75%、125%、200%，页面滚动后重新取坐标，移动软件窗口后原坐标均正确。
+- 独立进程窗口完整覆盖浏览器：通过原生窗口边界与 Z 顺序核实确实遮挡；后台按钮、canvas、隔离源 iframe 仍能点击。
+- 每次后台点击后系统鼠标位置不变。
+
+验证环境限制
+- 工具运行于隔离测试桌面，GetForegroundWindow 返回空值。因此“活动前台窗口始终属于另一软件”的断言跳过，不能把空句柄不变当作完整的焦点保持验证。
+- 该运行环境需仅在测试进程设置 QTWEBENGINE_DISABLE_SANDBOX=1 才能加载本地测试页；未将此设置加入软件或打包配置。默认沙箱开启的本机/打包环境仍需运行随包测试确认。
+- 未运行 OCR 模型、完整主窗口的所有功能、用户实际网站、最小化/隐藏窗口测试或 EXE 构建。
+- 本包是完整源码修复包，不包含已编译 EXE；原 GitHub Actions 打包入口保留并已更新为 Qt WebEngine 测试。
+
+运行测试
+python -m unittest discover -s tests -v
+python -m compileall -q main.py background_click.py tests
+python tests/test_browser.py
+设置 QT_SCALE_FACTOR=1.5 后可重复运行高 DPI 测试。
