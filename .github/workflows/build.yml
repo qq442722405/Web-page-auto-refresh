@@ -27,16 +27,25 @@ jobs:
           python -c "import PySide6; from PySide6.QtWebEngineWidgets import QWebEngineView; import ddddocr, onnxruntime; print('PySide6 OK'); print('QWebEngine/Chromium OK'); print('ddddocr OK'); print('onnxruntime OK')"
           python -c "import ddddocr; o=ddddocr.DdddOcr(show_ad=False); print('ddddocr model initialization: OK')"
 
-      - name: Check Python syntax
+      - name: Static checks
         shell: cmd
         run: |
-          python -m py_compile main.py background_click.py
+          python -m compileall -q main.py webmonitor
           python -m unittest discover -s tests -v
 
-      - name: Qt WebEngine background coordinate integration tests
+      - name: Image pipeline
+        shell: cmd
+        run: python tests/test_image_tools.py
+
+      - name: Background channel (CDP) live check
+        shell: cmd
+        run: python tests/test_cdp_live.py
+
+      - name: Qt WebEngine integration tests
         shell: cmd
         run: |
           python tests/test_browser.py
+          python tests/test_new_windows.py
 
       - name: Build onedir EXE
         shell: cmd
