@@ -1,0 +1,50 @@
+网页刷新数字监控 V25 验证记录
+日期：2026-09-30
+
+一、解决的问题
+旧版本在前台打开其它软件后，【后台点击】有时完全不动作。原因是后台点击只依赖
+Qt 合成鼠标事件投递给 Chromium 渲染控件，而真实桌面环境下窗口失去激活/被遮挡时，
+Chromium 会把页面当作后台页进入降频或冻结状态，输入也可能不再被处理。
+
+V25 的改动：
+1. 新增 Chromium 调试通道（CDP）：通过本机 127.0.0.1 调试端口直接向网页投递鼠标事件，
+   属于网页自身的输入管线，不依赖焦点、不依赖窗口是否置前、不移动系统鼠标。
+2. 三层递进通道 + 自动降级：调试通道 → Qt 合成事件 → 短暂置前真实点击（点击后立刻把
+   焦点与鼠标位置还原给原程序）。每条通道的失败原因都会写进日志与运行面板。
+3. Chromium 启动参数加入 --disable-renderer-backgrounding、
+   --disable-backgrounding-occluded-windows、--disable-background-timer-throttling、
+   --disable-features=CalculateNativeWinOcclusion，从底层禁止遮挡后降频/冻结。
+4. OCR 取图改为优先 Page.captureScreenshot（直接从网页取图），不再依赖屏幕抓取，
+   因此被其它窗口遮挡时识别结果依然正确。
+5. 识别框与点击点位统一为网页内坐标；旧配置（屏幕坐标）首次启动自动转换一次。
+
+二、已在本机通过
+- 全部源码语法编译、pyflakes 静态检查无告警。
+- 28 项无 GUI 依赖回归测试通过（操作闸门、报警规则增量确认、坐标换算、
+  配置校验/损坏降级、WebSocket 分帧收发、CDP 调用与错误、通道编排顺序）。
+- 图像处理管线校验通过：QImage → OpenCV BGR、行切分（3 行全部切对）、
+  每行 PNG 编码、过小行忽略。
+- 用本机真实 Chromium（Microsoft Edge）实机验证调试通道 12 项全部通过：
+  * 不前置浏览器窗口、不移动鼠标的情况下，点击 #button 计数 +1；
+  * 事件序列 pointerdown/mousedown/pointerup/mouseup/click 完整，isTrusted=true；
+  * canvas、Shadow DOM 同样命中；
+  * Page.captureScreenshot 按裁剪区域返回图片；
+  * Page.reload 后计数归零；/json/list 返回目标列表。
+
+三、验证环境限制（需要在你的环境补充确认）
+- 本机 Python 为 3.13，PySide6 未在该版本提供 QtWebEngine 轮子，因此无法在此
+  运行需要真实 Qt WebEngine 的 tests/test_browser.py 与 tests/test_new_windows.py。
+  已更新好脚本（改为从 webmonitor 包导入），请在 Python 3.11/3.12 + PySide6(<6.10)
+  环境运行：python tests/test_browser.py、python tests/test_new_windows.py。
+- ddddocr/OCR 引擎未在本机安装，OCR 数值识别与报警规则的联动需要你在实物表
+  页面跑一次【手动检测】确认。
+- test_browser.py 已增加“其它进程遮挡时，Qt 事件通道与调试通道分别继续点击”的用例，
+  这正是本次修复的核心场景，建议在真实桌面上跑一遍看结果。
+
+四、使用要点
+1. 右上角 ⚙️ →【二. 后台执行】点【🔎 自检】：应显示“调试通道可用 + 页面可视宽度”。
+2. 若公司安全策略禁止本机调试端口，会看到“调试通道未连通”，此时自动使用 Qt 事件通道，
+   仍可勾选“通道失败时允许短暂置前点击”兜底。
+3. 想把调试通道彻底关闭：在配置文件 auto_login_config.json 里
+   把 cdp_enabled 设为 false 并重启软件。
+4. “保持网页后台活跃”修改后需要重启软件生效（属于 Chromium 启动参数）。

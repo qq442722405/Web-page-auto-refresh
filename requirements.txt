@@ -1,0 +1,11 @@
+# V25 后台执行优化版依赖
+# 说明：本版本的“真后台执行”（Chromium 调试通道）全部使用 Python 标准库实现，
+# 没有新增第三方依赖；下面沿用 V24.5 的运行与打包依赖。
+PySide6>=6.5.0,<6.10
+PySide6-Essentials>=6.5.0,<6.10
+ddddocr==1.6.1
+onnxruntime>=1.20,<2
+opencv-python>=4.8.0
+numpy>=1.24.0,<3
+Pillow>=10.0
+pyinstaller>=6.0,<7

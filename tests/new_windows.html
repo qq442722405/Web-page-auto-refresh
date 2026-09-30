@@ -1,0 +1,7 @@
+﻿<!doctype html><meta charset="utf-8"><title>Link navigation tests</title>
+<style>a,button{display:block;margin:20px;width:200px;height:40px}</style>
+<a id="same" href="destination.html">Same window</a>
+<a id="blank" href="destination.html" target="_blank" rel="noopener">New tab link</a>
+<a id="named" href="destination.html" target="details">Named window</a>
+<button id="script" onclick="window.open('destination.html','_blank')">JavaScript window.open</button>
+<form method="post" target="_blank" action="/post"><input type="hidden" name="message" value="payload-kept"><button id="post">POST new window</button></form>
