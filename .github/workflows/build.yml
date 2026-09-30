@@ -6,6 +6,10 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # runner 默认控制台编码是 cp1252，脚本里打印中文会抛 UnicodeEncodeError
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
