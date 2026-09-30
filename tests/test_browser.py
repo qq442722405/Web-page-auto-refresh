@@ -21,6 +21,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# Windows CI 的控制台默认使用 cp1252，打印中文会抛 UnicodeEncodeError。
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is None:
+        continue
+    try:
+        _reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 CDP_PORT = 9455
 
 

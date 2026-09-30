@@ -41,7 +41,16 @@ V25 的改动：
 - test_browser.py 已增加“其它进程遮挡时，Qt 事件通道与调试通道分别继续点击”的用例，
   这正是本次修复的核心场景，建议在真实桌面上跑一遍看结果。
 
-四、使用要点
+四、Windows CI（cp1252 控制台）编码问题修复
+- 现象：GitHub Actions 的 windows-latest runner 默认控制台编码为 cp1252，
+  测试脚本 print 中文时抛 UnicodeEncodeError（如 "行切分得到 3 行"）。
+- 处理：tests/ 下 5 个脚本在导入阶段统一把 stdout/stderr 重设为 UTF-8
+  （errors="replace"，reconfigure 不可用时自动跳过），并在 build.yml 的 job 级
+  增加 PYTHONIOENCODING=utf-8 与 PYTHONUTF8=1 双重兜底。
+- 复验：以 PYTHONIOENCODING=cp1252 模拟该环境，图像处理脚本、28 项单测、
+  12 项 CDP 实机检查全部通过（exit 0）。
+
+五、使用要点
 1. 右上角 ⚙️ →【二. 后台执行】点【🔎 自检】：应显示“调试通道可用 + 页面可视宽度”。
 2. 若公司安全策略禁止本机调试端口，会看到“调试通道未连通”，此时自动使用 Qt 事件通道，
    仍可勾选“通道失败时允许短暂置前点击”兜底。

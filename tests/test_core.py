@@ -14,6 +14,17 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# Windows CI 的控制台默认使用 cp1252，打印中文（含断言失败信息）会抛 UnicodeEncodeError。
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is None:
+        continue
+    try:
+        _reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from webmonitor.alarm import AlarmTracker, build_rule, same_runs  # noqa: E402
 from webmonitor.config import clamp_float, clamp_int, load, normalize_roi, remember  # noqa: E402
 from webmonitor.coords import clamp_rect_values, css_clip, css_point, valid_zoom  # noqa: E402
